@@ -332,7 +332,8 @@ func (s *Store) UpsertFile(ctx context.Context, f File) (id int64, changed bool,
 	}
 
 	id = old.ID
-	changed = old.Size != f.Size || old.MTime != f.MTime || old.Status == StatusPending
+	changed = old.Size != f.Size || old.MTime != f.MTime ||
+		old.Status == StatusPending || old.Status == StatusSkipped // skipped (free tier) files are retried, e.g. after purchase
 	status := old.Status
 	if changed {
 		status = StatusPending
@@ -553,6 +554,102 @@ func (s *Store) ReplaceContent(ctx context.Context, fileID int64, items []Item) 
 				i8[i] = byte(x)
 			}
 			if _, err := insVec.ExecContext(ctx, itemID, v.Bin[:], i8, float64(v.Scale)); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+// ---- used by the indexer ----
+
+// FilesInRoot returns the paths of all files recorded under a root. The indexer compares
+// them with a fresh scan to find files deleted while Findly was not running (P-5).
+func (s *Store) FilesInRoot(ctx context.Context, rootID int64) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT path FROM files WHERE root_id = ?`, rootID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// FileWithContent returns another file with the same content hash whose content is fully
+// indexed, so identical files are embedded only once (plan 9.10 dedupe).
+func (s *Store) FileWithContent(ctx context.Context, hash string, exceptID int64) (id int64, ok bool, err error) {
+	err = s.db.QueryRowContext(ctx,
+		`SELECT id FROM files WHERE content_hash = ? AND status = ? AND id <> ? LIMIT 1`,
+		hash, StatusDone, exceptID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	return id, err == nil, err
+}
+
+// CopyContent replaces the content items of file `to` with copies of file `from`'s
+// items, vectors and keyword rows.
+func (s *Store) CopyContent(ctx context.Context, from, to int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM items WHERE file_id = ? AND kind <> ?`, to, ItemName); err != nil {
+		return err
+	}
+	rows, err := tx.QueryContext(ctx, `
+		SELECT i.id, i.kind, i.locator, i.text, v.bin, v.i8, v.scale
+		FROM items i LEFT JOIN vectors v ON v.item_id = i.id
+		WHERE i.file_id = ? AND i.kind <> ? ORDER BY i.id`, from, ItemName)
+	if err != nil {
+		return err
+	}
+	type src struct {
+		kind          string
+		locator, text sql.NullString
+		bin, i8       []byte
+		scale         sql.NullFloat64
+	}
+	var items []src
+	for rows.Next() {
+		var it src
+		var id int64
+		if err := rows.Scan(&id, &it.kind, &it.locator, &it.text, &it.bin, &it.i8, &it.scale); err != nil {
+			rows.Close()
+			return err
+		}
+		items = append(items, it)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, it := range items {
+		res, err := tx.ExecContext(ctx, `INSERT INTO items(file_id, kind, locator, text) VALUES(?, ?, ?, ?)`,
+			to, it.kind, it.locator, it.text)
+		if err != nil {
+			return err
+		}
+		newID, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		if it.text.Valid && it.text.String != "" {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO items_fts(rowid, name, text) VALUES(?, '', ?)`, newID, it.text.String); err != nil {
+				return err
+			}
+		}
+		if it.bin != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO vectors(item_id, bin, i8, scale) VALUES(?, ?, ?, ?)`,
+				newID, it.bin, it.i8, it.scale.Float64); err != nil {
 				return err
 			}
 		}

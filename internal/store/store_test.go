@@ -531,3 +531,70 @@ func TestOpenRefusesNetworkPaths(t *testing.T) {
 		}
 	}
 }
+
+func TestFilesInRoot(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	a, _ := s.AddRoot(ctx, `C:\A`)
+	b, _ := s.AddRoot(ctx, `C:\B`)
+	addFile(t, s, a.ID, `C:\A\1.txt`)
+	addFile(t, s, a.ID, `C:\A\2.txt`)
+	addFile(t, s, b.ID, `C:\B\3.txt`)
+	got, err := s.FilesInRoot(ctx, a.ID)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("FilesInRoot = %v, %v", got, err)
+	}
+}
+
+func TestDedupeCopyContent(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	root, _ := s.AddRoot(ctx, `C:\Docs`)
+	orig := addFile(t, s, root.ID, `C:\Docs\report.txt`)
+	dup := addFile(t, s, root.ID, `C:\Docs\report (copy).txt`)
+	s.ReplaceContent(ctx, orig, []Item{
+		{Kind: ItemPassage, Locator: `{"chunk":0}`, Text: "quarterly numbers", Vector: vec(4)},
+		{Kind: ItemPassage, Locator: `{"chunk":1}`, Text: "keyword only"},
+	})
+	s.SetFileResult(ctx, orig, StatusDone, "", "hash1", "")
+
+	if _, ok, _ := s.FileWithContent(ctx, "hash1", orig); ok {
+		t.Fatal("found itself")
+	}
+	id, ok, err := s.FileWithContent(ctx, "hash1", dup)
+	if err != nil || !ok || id != orig {
+		t.Fatalf("FileWithContent = %d %v %v", id, ok, err)
+	}
+	if err := s.CopyContent(ctx, orig, dup); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, s, `SELECT count(*) FROM items WHERE file_id = ? AND kind <> ?`, dup, ItemName); n != 2 {
+		t.Errorf("copied items = %d, want 2", n)
+	}
+	if n := count(t, s, `SELECT count(*) FROM vectors`); n != 2 {
+		t.Errorf("vectors = %d, want 2", n)
+	}
+	if n := matches(t, s, "quarterly"); n != 2 {
+		t.Errorf("keyword rows = %d, want 2", n)
+	}
+	// Deleting the original leaves the copy intact.
+	s.DeleteFile(ctx, `C:\Docs\report.txt`)
+	if n := matches(t, s, "quarterly"); n != 1 {
+		t.Errorf("after delete: %d, want 1", n)
+	}
+	if _, ok, _ := s.FileWithContent(ctx, "unknown", 0); ok {
+		t.Error("unknown hash found")
+	}
+}
+
+func TestSkippedFilesAreRetried(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	root, _ := s.AddRoot(ctx, `C:\Docs`)
+	f := File{RootID: root.ID, Path: `C:\Docs\a.txt`, Name: "a.txt", Ext: ".txt", Kind: "text", Size: 1, MTime: 1}
+	id, _, _ := s.UpsertFile(ctx, f)
+	s.SetFileResult(ctx, id, StatusSkipped, "", "", "free tier limit")
+	if _, changed, _ := s.UpsertFile(ctx, f); !changed {
+		t.Fatal("skipped file not offered for indexing again")
+	}
+}

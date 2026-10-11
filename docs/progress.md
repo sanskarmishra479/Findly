@@ -20,8 +20,8 @@
 - [x] T2 `store` (SQLite schema, migrations, cascade deletes incl. FTS, vectors, free-tier count)
 - [x] T3 `scan` (skip rules, secrets, code projects, excludes, counts)
 - [x] T4 `extract` — txt, md, csv, log, json, html, docx, odt, rtf + PDF (go-pdfium wasm, sandboxed)
-- [ ] T5 `chunk`, `embed`, `vecfmt`
-- [ ] T6 `index`
+- [x] T5 `chunk`, `embed`, `vecfmt` (+ `sidecar`)
+- [x] T6 `index` (pipeline, priorities, dedupe, deletions, free tier)
 - [ ] T7 `search`
 - [ ] T8 CLI index/search/stats
 - [ ] T9 evals
