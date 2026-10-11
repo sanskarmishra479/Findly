@@ -858,3 +858,49 @@ func (s *Store) FilesByID(ctx context.Context, ids []int64) (map[int64]File, err
 	}
 	return out, nil
 }
+
+// Counts summarizes the index for `cli stats` and the settings screen.
+type Counts struct {
+	Roots    int
+	ByStatus map[string]int
+	ByKind   map[string]int
+	Items    int // content items (passages, pages…)
+	Vectors  int
+}
+
+// Count returns index statistics.
+func (s *Store) Count(ctx context.Context) (Counts, error) {
+	c := Counts{ByStatus: map[string]int{}, ByKind: map[string]int{}}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM roots`).Scan(&c.Roots); err != nil {
+		return c, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM items WHERE kind <> ?`, ItemName).Scan(&c.Items); err != nil {
+		return c, err
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM vectors`).Scan(&c.Vectors); err != nil {
+		return c, err
+	}
+	for _, q := range []struct {
+		sql string
+		m   map[string]int
+	}{
+		{`SELECT status, count(*) FROM files GROUP BY status`, c.ByStatus},
+		{`SELECT kind, count(*) FROM files GROUP BY kind`, c.ByKind},
+	} {
+		rows, err := s.db.QueryContext(ctx, q.sql)
+		if err != nil {
+			return c, err
+		}
+		for rows.Next() {
+			var k string
+			var n int
+			if err := rows.Scan(&k, &n); err != nil {
+				rows.Close()
+				return c, err
+			}
+			q.m[k] = n
+		}
+		rows.Close()
+	}
+	return c, nil
+}

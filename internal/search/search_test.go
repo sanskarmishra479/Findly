@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sanskarmishra479/findly/internal/embed"
 	"github.com/sanskarmishra479/findly/internal/store"
@@ -343,5 +344,23 @@ func BenchmarkNearest100k(b *testing.B) {
 	b.ResetTimer()
 	for b.Loop() {
 		c.Nearest(&qv, Candidates)
+	}
+}
+
+// Lowercasing can change byte lengths ("İ" → "i̇"); snippet must not misplace or panic.
+func TestSnippetUnicodeCase(t *testing.T) {
+	for _, text := range []string{
+		strings.Repeat("İ", 300) + " target word here",
+		strings.Repeat("ẞ", 200) + " target",
+		"target" + strings.Repeat("İ", 500),
+		strings.Repeat("x", 199) + "é target",
+	} {
+		s := snippet(text, Parse("target"))
+		if !strings.Contains(s, "target") {
+			t.Errorf("snippet lost the word: %q", s)
+		}
+		if !utf8.ValidString(s) {
+			t.Errorf("invalid UTF-8 snippet: %q", s)
+		}
 	}
 }

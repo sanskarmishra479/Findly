@@ -27,6 +27,6 @@
 ## Notes for later phases
 - Phase 4: deferred job for partial PDFs (pages after 30); needs a `last_page` column (new migration).
 
-- [ ] T8 CLI index/search/stats
+- [x] T8 CLI index/search/stats/remove
 - [ ] T9 evals
 - [ ] T10 file-integrity test

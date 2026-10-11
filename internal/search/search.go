@@ -12,6 +12,7 @@ import (
 	"container/heap"
 	"context"
 	"encoding/json"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -237,11 +238,16 @@ func snippet(text string, q Query) string {
 	if text == "" {
 		return ""
 	}
-	lower := strings.ToLower(text)
+	// Search the original text case-insensitively, so positions are byte offsets into
+	// text itself (ToLower can change byte lengths, e.g. "İ", which would misplace the cut).
 	at := -1
 	for _, w := range append(append([]string{}, q.Phrases...), q.Words...) {
-		if i := strings.Index(lower, strings.ToLower(w)); i >= 0 {
-			at = i
+		re, err := regexp.Compile("(?i)" + regexp.QuoteMeta(w))
+		if err != nil {
+			continue
+		}
+		if loc := re.FindStringIndex(text); loc != nil {
+			at = loc[0]
 			break
 		}
 	}
