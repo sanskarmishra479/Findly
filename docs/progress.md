@@ -16,7 +16,7 @@
 
 ## Phase 1 — Text engine CLI
 - [x] T1 `safefs` (read-only, share flags, cloud-only + link skip, long paths) + `appfs` (os.Root, atomic writes) with tests
-- [ ] T1b Upgrade Go toolchain to >= 1.27.2 (GO-2026-6604 and 8 other stdlib vulns)
+- [x] T1b Go toolchain 1.27.2 required in go.mod; govulncheck clean
 - [ ] T2 `store`
 - [ ] T3 `scan`
 - [ ] T4 `extract`
