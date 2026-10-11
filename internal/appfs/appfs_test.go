@@ -170,3 +170,89 @@ func TestOpenRequiresAbsolute(t *testing.T) {
 		t.Fatal("expected error for relative root")
 	}
 }
+
+// Review finding 4: Path() is used by code outside os.Root (SQLite), so it must refuse
+// junctions itself.
+func TestPathRejectsJunction(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("junctions are Windows-only")
+	}
+	f := newFS(t)
+	outside := t.TempDir()
+	if err := f.MkdirAll("a"); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(f.Dir(), "a", "esc")
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, outside).CombinedOutput(); err != nil {
+		t.Fatalf("mklink /J: %v: %s", err, out)
+	}
+	if p, err := f.Path("a/esc/sqlite.db"); err == nil {
+		t.Fatalf("Path through junction returned %q", p)
+	}
+	if _, err := f.Path("index/index.db"); err != nil {
+		t.Fatalf("normal path refused: %v", err)
+	}
+}
+
+// Review finding 8: device names with extensions are refused too.
+func TestRejectsDeviceNames(t *testing.T) {
+	f := newFS(t)
+	for _, p := range []string{"NUL.txt", "index/COM1.db", "con", "lpt9.log", "Aux .x", "COM¹"} {
+		if err := f.WriteFile(p, []byte("x")); err == nil {
+			t.Errorf("WriteFile(%q) succeeded", p)
+		}
+	}
+	for _, p := range []string{"null.txt", "console.log", "com10.db", "index/nulls"} {
+		if _, err := f.Path(p); err != nil {
+			t.Errorf("Path(%q) wrongly refused: %v", p, err)
+		}
+	}
+}
+
+// Review: junction deeper in the path, and a junction swapped in while writing.
+func TestDeepJunctionAndRace(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("junctions are Windows-only")
+	}
+	f := newFS(t)
+	outside := t.TempDir()
+	if err := f.MkdirAll("a/b"); err != nil {
+		t.Fatal(err)
+	}
+	deep := filepath.Join(f.Dir(), "a", "b", "esc")
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", deep, outside).CombinedOutput(); err != nil {
+		t.Fatalf("mklink /J: %v: %s", err, out)
+	}
+	f.MkdirAll("a/b/esc/c/d")
+	f.WriteFile("a/b/esc/c/d/x.txt", []byte("x"))
+
+	// Race: keep swapping "x" between a real folder and a junction while writing into it.
+	swap := filepath.Join(f.Dir(), "x")
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			os.RemoveAll(swap)
+			os.Mkdir(swap, 0o700)
+			os.Remove(swap)
+			exec.Command("cmd", "/c", "mklink", "/J", swap, outside).Run()
+		}
+	}()
+	for range 300 {
+		f.MkdirAll("x/new")
+		f.WriteFile("x/file.txt", []byte("x"))
+	}
+	close(stop)
+	<-done
+
+	entries, _ := os.ReadDir(outside)
+	if len(entries) != 0 {
+		t.Fatalf("created outside the app directory: %v", entries)
+	}
+}

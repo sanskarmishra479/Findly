@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -116,45 +117,88 @@ func Open(path string) (*os.File, error) {
 		return nil, &os.PathError{Op: "open", Path: path, Err: ErrCloudOnly}
 	}
 
-	// First open the path itself, never what it points to. If it was swapped for a link
-	// after the Stat above, we catch it here instead of following it.
+	// Open the path itself, never what it points to. If it was swapped for a link after
+	// the Stat above, we catch it here instead of following it.
 	h, err := createFile(path, windows.FILE_FLAG_OPEN_REPARSE_POINT)
 	if err != nil {
 		return nil, err
 	}
-	attrs, tag, err := attributeTag(h)
-	if err != nil {
+	fail := func(h windows.Handle, err error) (*os.File, error) {
 		windows.CloseHandle(h)
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
+	attrs, tag, err := attributeTag(h)
+	switch {
+	case err != nil:
+		return fail(h, err)
+	case isNameSurrogate(attrs, tag):
+		return fail(h, ErrLink)
+	case IsCloudOnly(attrs):
+		return fail(h, ErrCloudOnly)
+	case attrs&windows.FILE_ATTRIBUTE_DIRECTORY != 0:
+		return fail(h, ErrIsDir)
+	}
+	// The file itself is not a link, but a folder earlier in the path could be a
+	// junction. The real path of the handle must equal the path we were given.
+	if err := checkFinalPath(h, path); err != nil {
+		return fail(h, err)
+	}
+
 	if attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		// Not a plain file. Links are refused; other reparse points (downloaded OneDrive
-		// files, compressed files) need their filter driver, so reopen normally.
-		windows.CloseHandle(h)
-		if isNameSurrogate(attrs, tag) {
-			return nil, &os.PathError{Op: "open", Path: path, Err: ErrLink}
-		}
-		if h, err = createFile(path, 0); err != nil {
+		// A non-link reparse point (downloaded OneDrive file, Windows-compressed file):
+		// its data is served by a filter driver, so open it again normally. Keep the first
+		// handle open until we have proved the second one is the very same file.
+		h2, err := createFile(path, 0)
+		if err != nil {
+			windows.CloseHandle(h)
 			return nil, err
 		}
-		if attrs, _, err = attributeTag(h); err != nil {
-			windows.CloseHandle(h)
-			return nil, &os.PathError{Op: "open", Path: path, Err: err}
+		same, err := sameFile(h, h2)
+		windows.CloseHandle(h)
+		if err != nil {
+			return fail(h2, err)
 		}
-	}
-	if IsCloudOnly(attrs) {
-		windows.CloseHandle(h)
-		return nil, &os.PathError{Op: "open", Path: path, Err: ErrCloudOnly}
-	}
-	if attrs&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
-		windows.CloseHandle(h)
-		return nil, &os.PathError{Op: "open", Path: path, Err: ErrIsDir}
+		if !same {
+			return fail(h2, ErrLink)
+		}
+		if attrs, _, err = attributeTag(h2); err != nil {
+			return fail(h2, err)
+		}
+		if IsCloudOnly(attrs) {
+			return fail(h2, ErrCloudOnly)
+		}
+		h = h2
 	}
 	return os.NewFile(uintptr(h), filepath.Clean(path)), nil
 }
 
+// Canonical returns the real path of an existing folder or file: links in the path are
+// resolved and the casing matches the disk. Use it once when the user picks a folder;
+// everything else in safefs then refuses paths that go through links.
+func Canonical(path string) (string, error) {
+	p, err := longPath(path)
+	if err != nil {
+		return "", err
+	}
+	p16, err := windows.UTF16PtrFromString(p)
+	if err != nil {
+		return "", err
+	}
+	h, err := windows.CreateFile(p16, 0, // no access needed, metadata only
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return "", &os.PathError{Op: "canonical", Path: path, Err: err}
+	}
+	defer windows.CloseHandle(h)
+	return finalPath(h)
+}
+
 // ReadFile reads a whole file, refusing files larger than limit bytes.
 func ReadFile(path string, limit int64) ([]byte, error) {
+	if limit < 0 || limit == math.MaxInt64 {
+		return nil, fmt.Errorf("safefs: invalid limit %d", limit)
+	}
 	f, err := Open(path)
 	if err != nil {
 		return nil, err
@@ -177,12 +221,16 @@ var (
 )
 
 // WalkFunc is called for every entry under the root (not for the root itself).
-// If reading a directory fails, it is called with that directory's Info and the error.
+// If reading a directory fails, it is called with that directory's Info and the error;
+// returning nil or SkipDir then continues with the next sibling.
 type WalkFunc func(info Info, err error) error
 
 // WalkDir walks the tree under root in lexical order per directory. It never descends
-// into links (I-5); link entries are still passed to fn so callers can count them.
-// Return SkipDir from fn to skip a directory, SkipAll to stop.
+// into links (I-5) or cloud-only folders (I-4); those entries are still passed to fn so
+// callers can count them. root must be a real path (see Canonical).
+//
+// Like io/fs: returning SkipDir for a directory skips it; returning SkipDir for a file
+// skips the rest of that file's directory; SkipAll stops the walk.
 func WalkDir(root string, fn WalkFunc) error {
 	info, err := Stat(root)
 	if err != nil {
@@ -202,17 +250,23 @@ func walk(dir string, fn WalkFunc) error {
 	entries, err := readDir(dir)
 	if err != nil {
 		info, _ := Stat(dir)
-		return fn(info, err)
+		if err := fn(info, err); err != nil && !errors.Is(err, SkipDir) {
+			return err
+		}
+		return nil
 	}
 	for _, e := range entries {
 		err := fn(e, nil)
 		if errors.Is(err, SkipDir) {
-			continue
+			if e.IsDir() {
+				continue
+			}
+			return nil
 		}
 		if err != nil {
 			return err
 		}
-		if e.IsDir() && !e.IsLink() {
+		if e.IsDir() && !e.IsLink() && !e.IsCloudOnly() {
 			if err := walk(e.Path, fn); err != nil {
 				return err
 			}
@@ -222,7 +276,11 @@ func walk(dir string, fn WalkFunc) error {
 }
 
 // readDir lists one directory with FindFirstFile/FindNextFile (metadata only).
+// It first proves the directory is reached without going through a link.
 func readDir(dir string) ([]Info, error) {
+	if err := checkDir(dir); err != nil {
+		return nil, err
+	}
 	pattern, err := longPath(filepath.Join(dir, "*"))
 	if err != nil {
 		return nil, err
@@ -233,6 +291,9 @@ func readDir(dir string) ([]Info, error) {
 	}
 	var fd windows.Win32finddata
 	h, err := windows.FindFirstFile(p16, &fd)
+	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+		return nil, nil // an empty drive root has no "." or ".." entries
+	}
 	if err != nil {
 		return nil, &os.PathError{Op: "readdir", Path: dir, Err: err}
 	}
@@ -285,6 +346,89 @@ func createFile(path string, extraFlags uint32) (windows.Handle, error) {
 		return 0, &os.PathError{Op: "open", Path: path, Err: err}
 	}
 	return h, nil
+}
+
+// checkDir opens dir itself (not what it may point to) and refuses links, cloud-only
+// folders and folders reached through a junction higher up in the path.
+func checkDir(dir string) error {
+	p, err := longPath(dir)
+	if err != nil {
+		return err
+	}
+	p16, err := windows.UTF16PtrFromString(p)
+	if err != nil {
+		return err
+	}
+	h, err := windows.CreateFile(p16, 0,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return &os.PathError{Op: "readdir", Path: dir, Err: err}
+	}
+	defer windows.CloseHandle(h)
+	attrs, tag, err := attributeTag(h)
+	switch {
+	case err != nil:
+		return &os.PathError{Op: "readdir", Path: dir, Err: err}
+	case isNameSurrogate(attrs, tag):
+		return &os.PathError{Op: "readdir", Path: dir, Err: ErrLink}
+	case IsCloudOnly(attrs):
+		return &os.PathError{Op: "readdir", Path: dir, Err: ErrCloudOnly}
+	}
+	return checkFinalPath(h, dir)
+}
+
+// checkFinalPath refuses a handle whose real path differs from the path we asked for,
+// which means some folder in the path is a junction or symlink. Comparison ignores case,
+// like Windows. Paths written with 8.3 short names are refused too; safefs callers use
+// the long names that WalkDir and Canonical return.
+func checkFinalPath(h windows.Handle, want string) error {
+	got, err := finalPath(h)
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(got, filepath.Clean(stripLongPrefix(want))) {
+		return fmt.Errorf("%w: real path is %s", ErrLink, got)
+	}
+	return nil
+}
+
+// finalPath returns the real path of an open handle in normal C:\... or \\server\... form.
+func finalPath(h windows.Handle) (string, error) {
+	buf := make([]uint16, 512)
+	for {
+		n, err := windows.GetFinalPathNameByHandle(h, &buf[0], uint32(len(buf)), 0)
+		if err != nil {
+			return "", err
+		}
+		if int(n) < len(buf) {
+			return stripLongPrefix(windows.UTF16ToString(buf[:n])), nil
+		}
+		buf = make([]uint16, n+1) // too small: n is the size needed
+	}
+}
+
+// stripLongPrefix turns \\?\C:\x into C:\x and \\?\UNC\server\x into \\server\x.
+func stripLongPrefix(p string) string {
+	if rest, ok := strings.CutPrefix(p, `\\?\UNC\`); ok {
+		return `\\` + rest
+	}
+	return strings.TrimPrefix(p, `\\?\`)
+}
+
+// sameFile reports whether two handles refer to the same file on the same volume.
+func sameFile(a, b windows.Handle) (bool, error) {
+	var ia, ib windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(a, &ia); err != nil {
+		return false, err
+	}
+	if err := windows.GetFileInformationByHandle(b, &ib); err != nil {
+		return false, err
+	}
+	return ia.VolumeSerialNumber == ib.VolumeSerialNumber &&
+		ia.FileIndexHigh == ib.FileIndexHigh &&
+		ia.FileIndexLow == ib.FileIndexLow, nil
 }
 
 // attributeTag returns the attributes and reparse tag of an open handle.

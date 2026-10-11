@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // AppID is the frozen internal name used for the data folder (see plan.md, top).
@@ -80,12 +81,29 @@ func (f *FS) Close() error { return f.root.Close() }
 func (f *FS) Dir() string { return f.path }
 
 // Path returns the absolute path for rel, for code that must open files itself (for
-// example SQLite). rel is validated the same way as for writes.
+// example SQLite). Unlike the other methods, the caller's later use of the path is not
+// protected by os.Root, so Path also refuses rel if any existing folder or file along it
+// is a symlink or junction. A link created after this check is not caught; only pass
+// paths under folders Findly itself created (such as index/).
 func (f *FS) Path(rel string) (string, error) {
 	if err := check(rel); err != nil {
 		return "", err
 	}
-	return filepath.Join(f.path, filepath.FromSlash(rel)), nil
+	rel = filepath.FromSlash(rel)
+	parts := strings.Split(rel, string(filepath.Separator))
+	for i := range parts {
+		info, err := f.root.Lstat(filepath.Join(parts[:i+1]...))
+		if errors.Is(err, fs.ErrNotExist) {
+			break // the rest does not exist yet, so it cannot be a link
+		}
+		if err != nil {
+			return "", err
+		}
+		if info.Mode()&(fs.ModeSymlink|fs.ModeIrregular) != 0 {
+			return "", fmt.Errorf("%w: %q goes through a link", ErrOutside, rel)
+		}
+	}
+	return filepath.Join(f.path, rel), nil
 }
 
 // WriteFile writes data to rel atomically: the old content stays intact until the new
@@ -172,10 +190,37 @@ func (f *FS) RemoveAll(rel string) error {
 // check rejects absolute paths, "..", empty names and Windows device names (NUL, COM1…).
 // os.Root enforces the same rules again when the path is used; this gives a clear error early.
 func check(rel string) error {
-	if rel == "" || !filepath.IsLocal(filepath.FromSlash(rel)) {
+	rel = filepath.FromSlash(rel)
+	if rel == "" || !filepath.IsLocal(rel) {
 		return fmt.Errorf("%w: %q", ErrOutside, rel)
 	}
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if isDeviceName(part) {
+			return fmt.Errorf("%w: %q uses a Windows device name", ErrOutside, rel)
+		}
+	}
 	return nil
+}
+
+// isDeviceName reports names like NUL, nul.txt or COM1.db. filepath.IsLocal allows
+// "NUL.txt", but on Windows 10 that still opens the NUL device when used as a plain path.
+func isDeviceName(name string) bool {
+	base, _, _ := strings.Cut(name, ".")
+	base = strings.ToUpper(strings.TrimRight(base, " "))
+	switch base {
+	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
+		return true
+	}
+	if len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) {
+		return base[3] >= '0' && base[3] <= '9'
+	}
+	if rest, ok := strings.CutPrefix(base, "COM"); ok {
+		return rest == "¹" || rest == "²" || rest == "³"
+	}
+	if rest, ok := strings.CutPrefix(base, "LPT"); ok {
+		return rest == "¹" || rest == "²" || rest == "³"
+	}
+	return false
 }
 
 func randomSuffix() (string, error) {

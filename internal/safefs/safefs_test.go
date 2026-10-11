@@ -5,6 +5,7 @@ package safefs
 import (
 	"errors"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -276,5 +277,156 @@ func mklinkJunction(t *testing.T, link, target string) {
 	out, err := exec.Command("cmd", "/c", "mklink", "/J", link, target).CombinedOutput()
 	if err != nil {
 		t.Fatalf("mklink /J: %v: %s", err, out)
+	}
+}
+
+// Review finding 1: a junction in a *folder* part of the path must not be followed.
+func TestOpenRejectsJunctionInParent(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	secret := writeTemp(t, outside, "secret.txt", "outside")
+	mklinkJunction(t, filepath.Join(root, "jump"), outside)
+
+	through := filepath.Join(root, "jump", "secret.txt")
+	if _, err := ReadFile(through, 1024); !errors.Is(err, ErrLink) {
+		t.Fatalf("got %v, want ErrLink", err)
+	}
+	// The real path still works.
+	if _, err := ReadFile(secret, 1024); err != nil {
+		t.Fatal(err)
+	}
+	// Walking into a junction through a parent is refused too.
+	err := WalkDir(root, func(info Info, err error) error { return err })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readDir(filepath.Join(root, "jump")); !errors.Is(err, ErrLink) {
+		t.Fatalf("readDir through junction: got %v, want ErrLink", err)
+	}
+}
+
+func TestCanonicalResolvesJunction(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	mklinkJunction(t, filepath.Join(root, "jump"), outside)
+
+	got, err := Canonical(filepath.Join(root, "jump"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := Canonical(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.EqualFold(got, want) || strings.Contains(strings.ToLower(got), "jump") {
+		t.Fatalf("Canonical = %q, want %q", got, want)
+	}
+}
+
+// Review finding 3: an unreadable folder must not end the walk early.
+func TestWalkDirContinuesAfterAccessDenied(t *testing.T) {
+	root := t.TempDir()
+	locked := filepath.Join(root, "a_locked")
+	os.Mkdir(locked, 0o755)
+	os.Mkdir(filepath.Join(root, "b_ok"), 0o755)
+	writeTemp(t, root, "c.txt", "x")
+
+	user := os.Getenv("USERNAME")
+	if out, err := exec.Command("icacls", locked, "/deny", user+":(RD)").CombinedOutput(); err != nil {
+		t.Skipf("icacls deny: %v: %s", err, out)
+	}
+	t.Cleanup(func() { exec.Command("icacls", locked, "/remove:d", user).Run() })
+
+	var seen []string
+	var gotErr bool
+	err := WalkDir(root, func(info Info, err error) error {
+		if err != nil {
+			gotErr = true
+			return SkipDir
+		}
+		seen = append(seen, info.Name)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gotErr {
+		t.Fatal("expected an error callback for the locked folder")
+	}
+	joined := strings.Join(seen, ",")
+	if !strings.Contains(joined, "b_ok") || !strings.Contains(joined, "c.txt") {
+		t.Fatalf("walk stopped early: %v", seen)
+	}
+}
+
+// SkipDir returned for a file skips the rest of that folder, like io/fs.
+func TestWalkDirSkipDirOnFile(t *testing.T) {
+	root := t.TempDir()
+	writeTemp(t, root, "a.txt", "x")
+	writeTemp(t, root, "b.txt", "x")
+	var seen []string
+	WalkDir(root, func(info Info, err error) error {
+		seen = append(seen, info.Name)
+		return SkipDir
+	})
+	if len(seen) != 1 || seen[0] != "a.txt" {
+		t.Fatalf("got %v, want [a.txt]", seen)
+	}
+}
+
+// Review finding 5: cloud-only folders are reported but never listed.
+func TestWalkDirSkipsCloudOnlyFolder(t *testing.T) {
+	root := t.TempDir()
+	cloud := filepath.Join(root, "cloud")
+	os.Mkdir(cloud, 0o755)
+	writeTemp(t, cloud, "inside.txt", "x")
+	setAttrs(t, cloud, windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_OFFLINE)
+	t.Cleanup(func() { setAttrs(t, cloud, windows.FILE_ATTRIBUTE_DIRECTORY) })
+
+	var seen []string
+	if err := WalkDir(root, func(info Info, err error) error {
+		seen = append(seen, info.Name)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(seen) != 1 || seen[0] != "cloud" {
+		t.Fatalf("got %v, want only [cloud]", seen)
+	}
+}
+
+// Review: the reopen branch for non-link reparse points. A Windows-compressed (WOF)
+// file is a reparse point that must still be readable.
+func TestOpenReadsCompressedFile(t *testing.T) {
+	dir := t.TempDir()
+	content := strings.Repeat("compress me please ", 4096)
+	p := writeTemp(t, dir, "packed.txt", content)
+	if out, err := exec.Command("compact", "/c", "/exe:xpress4k", p).CombinedOutput(); err != nil {
+		t.Skipf("compact /exe: %v: %s", err, out)
+	}
+	info, err := Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Directory listings may hide the WOF reparse flag; Open sees it on the handle and
+	// takes the reopen path. Either way the content must read back correctly.
+	if info.IsLink() {
+		t.Fatal("compressed file wrongly reported as a link")
+	}
+	b, err := ReadFile(p, int64(len(content)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(b) != content {
+		t.Fatal("content mismatch")
+	}
+}
+
+func TestReadFileRejectsBadLimit(t *testing.T) {
+	p := writeTemp(t, t.TempDir(), "x.txt", "x")
+	for _, limit := range []int64{-1, math.MaxInt64} {
+		if _, err := ReadFile(p, limit); err == nil {
+			t.Errorf("limit %d: expected error", limit)
+		}
 	}
 }
