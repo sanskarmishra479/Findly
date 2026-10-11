@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 )
 
 func openTest(t *testing.T) *Store {
@@ -558,15 +559,11 @@ func TestDedupeCopyContent(t *testing.T) {
 	})
 	s.SetFileResult(ctx, orig, StatusDone, "", "hash1", "")
 
-	if _, ok, _ := s.FileWithContent(ctx, "hash1", orig); ok {
-		t.Fatal("found itself")
+	if copied, _ := s.CopyDuplicate(ctx, "hash1", orig); copied {
+		t.Fatal("copied from itself")
 	}
-	id, ok, err := s.FileWithContent(ctx, "hash1", dup)
-	if err != nil || !ok || id != orig {
-		t.Fatalf("FileWithContent = %d %v %v", id, ok, err)
-	}
-	if err := s.CopyContent(ctx, orig, dup); err != nil {
-		t.Fatal(err)
+	if copied, err := s.CopyDuplicate(ctx, "hash1", dup); err != nil || !copied {
+		t.Fatalf("CopyDuplicate = %v %v", copied, err)
 	}
 	if n := count(t, s, `SELECT count(*) FROM items WHERE file_id = ? AND kind <> ?`, dup, ItemName); n != 2 {
 		t.Errorf("copied items = %d, want 2", n)
@@ -582,8 +579,8 @@ func TestDedupeCopyContent(t *testing.T) {
 	if n := matches(t, s, "quarterly"); n != 1 {
 		t.Errorf("after delete: %d, want 1", n)
 	}
-	if _, ok, _ := s.FileWithContent(ctx, "unknown", 0); ok {
-		t.Error("unknown hash found")
+	if copied, _ := s.CopyDuplicate(ctx, "unknown", dup); copied {
+		t.Error("unknown hash copied")
 	}
 }
 
@@ -596,5 +593,36 @@ func TestSkippedFilesAreRetried(t *testing.T) {
 	s.SetFileResult(ctx, id, StatusSkipped, "", "", "free tier limit")
 	if _, changed, _ := s.UpsertFile(ctx, f); !changed {
 		t.Fatal("skipped file not offered for indexing again")
+	}
+}
+
+func TestHasContent(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	root, _ := s.AddRoot(ctx, `C:\Docs`)
+	id := addFile(t, s, root.ID, `C:\Docs\a.txt`)
+	if has, _ := s.HasContent(ctx, id); has {
+		t.Fatal("name-only file reported as having content")
+	}
+	s.ReplaceContent(ctx, id, []Item{{Kind: ItemPassage, Text: "x"}})
+	if has, _ := s.HasContent(ctx, id); !has {
+		t.Fatal("content not detected")
+	}
+}
+
+func TestFailedFilesRetriedLater(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	root, _ := s.AddRoot(ctx, `C:\Docs`)
+	f := File{RootID: root.ID, Path: `C:\Docs\locked.docx`, Name: "locked.docx", Ext: ".docx", Kind: "doc", Size: 1, MTime: 1}
+	id, _, _ := s.UpsertFile(ctx, f)
+	s.SetFileResult(ctx, id, StatusFailed, "", "", "file locked")
+	if _, changed, _ := s.UpsertFile(ctx, f); changed {
+		t.Fatal("failed file retried immediately")
+	}
+	old := time.Now().Add(-RetryFailedAfter - time.Hour).UnixNano()
+	s.db.Exec(`UPDATE files SET indexed_at = ? WHERE id = ?`, old, id)
+	if _, changed, _ := s.UpsertFile(ctx, f); !changed {
+		t.Fatal("failed file not retried after the wait")
 	}
 }

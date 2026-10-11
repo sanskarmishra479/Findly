@@ -308,3 +308,133 @@ func TestProgressIsReported(t *testing.T) {
 func scanFile(path, kind string, mtime int64) scan.File {
 	return scan.File{Path: path, Name: filepath.Base(path), Kind: kind, ModTime: mtime}
 }
+
+func (e *env) fill(n int) {
+	for i := range n {
+		e.write(fmt.Sprintf("f/%03d.txt", i), fmt.Sprintf("document number %d with unique words %d", i, i*7))
+	}
+}
+
+func touch(t *testing.T, p, content string) {
+	t.Helper()
+	os.WriteFile(p, []byte(content), 0o644)
+	later := time.Now().Add(time.Minute)
+	os.Chtimes(p, later, later)
+}
+
+// Review 1 (L-3): editing an already-indexed file at the free limit keeps it searchable.
+func TestEditAtFreeLimitKeepsContent(t *testing.T) {
+	e := newEnv(t)
+	e.fill(FreeLimit)
+	e.run()
+	touch(t, filepath.Join(e.dir, "f", "007.txt"), "edited text for document seven")
+	st := e.run()
+	if st.Indexed != 1 || st.Skipped != 0 {
+		t.Fatalf("stats = %+v", st)
+	}
+	if f := e.file("f/007.txt"); f.Status != store.StatusDone {
+		t.Fatalf("edited file status = %s", f.Status)
+	}
+	if n, _ := e.st.CountContentIndexed(context.Background()); n != FreeLimit {
+		t.Fatalf("content-indexed = %d, want %d", n, FreeLimit)
+	}
+}
+
+// Review 2: re-indexed files do not use extra free slots.
+func TestReindexDoesNotDoubleCount(t *testing.T) {
+	e := newEnv(t)
+	e.fill(10)
+	e.run()
+	for i := range 10 {
+		touch(t, filepath.Join(e.dir, "f", fmt.Sprintf("%03d.txt", i)), fmt.Sprintf("edited %d", i))
+	}
+	for i := range FreeLimit - 10 {
+		e.write(fmt.Sprintf("g/%03d.txt", i), fmt.Sprintf("new file %d words %d", i, i*3))
+	}
+	st := e.run()
+	if st.Indexed != FreeLimit || st.Skipped != 0 {
+		t.Fatalf("Indexed=%d Skipped=%d, want %d and 0", st.Indexed, st.Skipped, FreeLimit)
+	}
+}
+
+// Review 3: a transient server error stops the run and leaves files pending (not failed).
+func TestTransientEmbedErrorLeavesPending(t *testing.T) {
+	e := newEnv(t)
+	e.write("a.txt", "text to embed")
+	e.emb.err = errors.New("embed: request: connection reset")
+	if _, err := e.ix.IndexRoot(context.Background(), e.root); !errors.Is(err, ErrEmbedder) {
+		t.Fatalf("got %v, want ErrEmbedder", err)
+	}
+	if f := e.file("a.txt"); f.Status != store.StatusPending {
+		t.Fatalf("status = %s, want pending", f.Status)
+	}
+	// An error about the input itself fails only that file.
+	e.emb.err = fmt.Errorf("%w: too long", embed.ErrInput)
+	st := e.run()
+	if st.Failed != 1 {
+		t.Fatalf("stats = %+v", st)
+	}
+}
+
+// Review 5: an unreadable folder keeps its own files but does not stop cleanup elsewhere.
+func TestUnreadableFolderOnlyProtectsItself(t *testing.T) {
+	e := newEnv(t)
+	e.write("locked/inside.txt", "inside a folder that becomes unreadable")
+	gone := e.write("other/gone.txt", "will be deleted")
+	e.run()
+	locked := filepath.Join(e.dir, "locked")
+	user := os.Getenv("USERNAME")
+	if out, err := exec.Command("icacls", locked, "/deny", user+":(RD)").CombinedOutput(); err != nil {
+		t.Skipf("icacls: %v %s", err, out)
+	}
+	t.Cleanup(func() { exec.Command("icacls", locked, "/remove:d", user).Run() })
+	os.Remove(gone)
+	st := e.run()
+	if st.Deleted != 1 {
+		t.Fatalf("Deleted = %d, want 1 (only other/gone.txt)", st.Deleted)
+	}
+	if _, ok, _ := e.st.FileByPath(context.Background(), filepath.Join(locked, "inside.txt")); !ok {
+		t.Fatal("file in unreadable folder was purged")
+	}
+}
+
+// Review 6: progress reaches Total even with images and other files present.
+func TestProgressCompletes(t *testing.T) {
+	e := newEnv(t)
+	e.write("a.txt", "text one")
+	e.write("b.md", "text two")
+	e.write("pic.png", "x")
+	e.write("app.exe", "MZ")
+	var last Progress
+	e.ix.OnProgress = func(p Progress) { last = p }
+	e.run()
+	if last.Total != 2 || last.Done != last.Total {
+		t.Fatalf("progress = %+v", last)
+	}
+	// Images stay pending but are not re-queued as work for this phase.
+	last = Progress{}
+	if st := e.run(); st.Indexed != 0 || last.Total != 0 {
+		t.Fatalf("second run did work: %+v %+v", st, last)
+	}
+}
+
+// Review 7: cancelling a run returns promptly.
+func TestCancelStopsQuickly(t *testing.T) {
+	e := newEnv(t)
+	e.fill(200)
+	ctx, cancel := context.WithCancel(context.Background())
+	n := 0
+	e.ix.OnProgress = func(Progress) {
+		if n++; n == 5 {
+			cancel()
+		}
+	}
+	start := time.Now()
+	_, err := e.ix.IndexRoot(ctx, e.root)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, want Canceled", err)
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("cancel took %v", d)
+	}
+}

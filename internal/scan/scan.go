@@ -106,6 +106,9 @@ func containsSecret(n string) bool {
 	}
 }
 
+// MaxFailedDirs caps Stats.FailedDirs; beyond it callers should assume anything failed.
+const MaxFailedDirs = 1000
+
 // MaxSize is the largest non-video file considered (plan 9.3: 2 GB).
 const MaxSize = 2 << 30
 
@@ -121,13 +124,14 @@ type File struct {
 
 // Stats counts what a scan found. Counts and Bytes are keyed by kind.
 type Stats struct {
-	Counts    map[string]int
-	Bytes     map[string]int64
-	Secret    int // files skipped by IsSecretName
-	CloudOnly int // files and folders skipped because they are not on this PC (I-4)
-	Links     int // symlinks/junctions not followed (I-5)
-	TooLarge  int
-	Errors    int // folders that could not be read (e.g. access denied)
+	Counts     map[string]int
+	Bytes      map[string]int64
+	Secret     int // files skipped by IsSecretName
+	CloudOnly  int // files and folders skipped because they are not on this PC (I-4)
+	Links      int // symlinks/junctions not followed (I-5)
+	TooLarge   int
+	Errors     int      // folders that could not be read (e.g. access denied)
+	FailedDirs []string // those folders (first MaxFailedDirs), so callers keep their files
 }
 
 // Options for one root.
@@ -196,6 +200,9 @@ func (s *scanner) dir(path string, inCodeProject bool) error {
 	entries, err := safefs.ReadDir(path)
 	if err != nil {
 		s.stats.Errors++
+		if len(s.stats.FailedDirs) < MaxFailedDirs {
+			s.stats.FailedDirs = append(s.stats.FailedDirs, path)
+		}
 		return nil // an unreadable subfolder must not stop the scan
 	}
 	return s.entries(entries, inCodeProject || isCodeProject(entries))

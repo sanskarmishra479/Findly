@@ -23,6 +23,10 @@
 - [x] T5 `chunk`, `embed`, `vecfmt` (+ `sidecar`)
 - [x] T6 `index` (pipeline, priorities, dedupe, deletions, free tier)
 - [ ] T7 `search`
+
+## Notes for later phases
+- Phase 4: deferred job for partial PDFs (pages after 30); needs a `last_page` column (new migration).
+
 - [ ] T8 CLI index/search/stats
 - [ ] T9 evals
 - [ ] T10 file-integrity test

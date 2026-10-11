@@ -310,8 +310,9 @@ func (s *Store) UpsertFile(ctx context.Context, f File) (id int64, changed bool,
 	defer tx.Rollback()
 
 	var old File
-	err = tx.QueryRowContext(ctx, `SELECT id, size, mtime, status, name FROM files WHERE path_key = ?`, key).
-		Scan(&old.ID, &old.Size, &old.MTime, &old.Status, &old.Name)
+	var indexedAt sql.NullInt64
+	err = tx.QueryRowContext(ctx, `SELECT id, size, mtime, status, name, indexed_at FROM files WHERE path_key = ?`, key).
+		Scan(&old.ID, &old.Size, &old.MTime, &old.Status, &old.Name, &indexedAt)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		res, err := tx.ExecContext(ctx,
@@ -333,7 +334,9 @@ func (s *Store) UpsertFile(ctx context.Context, f File) (id int64, changed bool,
 
 	id = old.ID
 	changed = old.Size != f.Size || old.MTime != f.MTime ||
-		old.Status == StatusPending || old.Status == StatusSkipped // skipped (free tier) files are retried, e.g. after purchase
+		old.Status == StatusPending || old.Status == StatusSkipped || // skipped (free tier): retried, e.g. after purchase
+		// Failures can be temporary (file locked, engine busy): retry once a day.
+		old.Status == StatusFailed && time.Since(time.Unix(0, indexedAt.Int64)) > RetryFailedAfter
 	status := old.Status
 	if changed {
 		status = StatusPending
@@ -582,35 +585,50 @@ func (s *Store) FilesInRoot(ctx context.Context, rootID int64) ([]string, error)
 	return out, rows.Err()
 }
 
-// FileWithContent returns another file with the same content hash whose content is fully
-// indexed, so identical files are embedded only once (plan 9.10 dedupe).
-func (s *Store) FileWithContent(ctx context.Context, hash string, exceptID int64) (id int64, ok bool, err error) {
-	err = s.db.QueryRowContext(ctx,
-		`SELECT id FROM files WHERE content_hash = ? AND status = ? AND id <> ? LIMIT 1`,
-		hash, StatusDone, exceptID).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return 0, false, nil
-	}
-	return id, err == nil, err
+// RetryFailedAfter is how long a failed file waits before UpsertFile offers it again.
+const RetryFailedAfter = 24 * time.Hour
+
+// HasContent reports whether a file has content items (not just its name row).
+func (s *Store) HasContent(ctx context.Context, fileID int64) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM items WHERE file_id = ? AND kind <> ?)`, fileID, ItemName).Scan(&n)
+	return n == 1, err
 }
 
-// CopyContent replaces the content items of file `to` with copies of file `from`'s
-// items, vectors and keyword rows.
-func (s *Store) CopyContent(ctx context.Context, from, to int64) error {
+// CopyDuplicate looks for another fully indexed file with the same content hash and, if
+// one exists, copies its items, vectors and keyword rows to file `to` — all in one
+// transaction, so the source cannot disappear halfway. Identical files are embedded only
+// once (plan 9.10). copied is false if there is no usable source.
+func (s *Store) CopyDuplicate(ctx context.Context, hash string, to int64) (copied bool, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
+
+	var from int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT f.id FROM files f
+		WHERE f.content_hash = ? AND f.status = ? AND f.id <> ?
+		  AND EXISTS(SELECT 1 FROM items i WHERE i.file_id = f.id AND i.kind <> ?)
+		LIMIT 1`, hash, StatusDone, to, ItemName).Scan(&from)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
 	if _, err := tx.ExecContext(ctx, `DELETE FROM items WHERE file_id = ? AND kind <> ?`, to, ItemName); err != nil {
-		return err
+		return false, err
 	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT i.id, i.kind, i.locator, i.text, v.bin, v.i8, v.scale
+		SELECT i.kind, i.locator, i.text, v.bin, v.i8, v.scale
 		FROM items i LEFT JOIN vectors v ON v.item_id = i.id
 		WHERE i.file_id = ? AND i.kind <> ? ORDER BY i.id`, from, ItemName)
 	if err != nil {
-		return err
+		return false, err
 	}
 	type src struct {
 		kind          string
@@ -621,38 +639,37 @@ func (s *Store) CopyContent(ctx context.Context, from, to int64) error {
 	var items []src
 	for rows.Next() {
 		var it src
-		var id int64
-		if err := rows.Scan(&id, &it.kind, &it.locator, &it.text, &it.bin, &it.i8, &it.scale); err != nil {
+		if err := rows.Scan(&it.kind, &it.locator, &it.text, &it.bin, &it.i8, &it.scale); err != nil {
 			rows.Close()
-			return err
+			return false, err
 		}
 		items = append(items, it)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
+		return false, err
 	}
 	for _, it := range items {
 		res, err := tx.ExecContext(ctx, `INSERT INTO items(file_id, kind, locator, text) VALUES(?, ?, ?, ?)`,
 			to, it.kind, it.locator, it.text)
 		if err != nil {
-			return err
+			return false, err
 		}
 		newID, err := res.LastInsertId()
 		if err != nil {
-			return err
+			return false, err
 		}
 		if it.text.Valid && it.text.String != "" {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO items_fts(rowid, name, text) VALUES(?, '', ?)`, newID, it.text.String); err != nil {
-				return err
+				return false, err
 			}
 		}
 		if it.bin != nil {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO vectors(item_id, bin, i8, scale) VALUES(?, ?, ?, ?)`,
 				newID, it.bin, it.i8, it.scale.Float64); err != nil {
-				return err
+				return false, err
 			}
 		}
 	}
-	return tx.Commit()
+	return len(items) > 0, tx.Commit()
 }

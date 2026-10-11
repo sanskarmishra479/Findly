@@ -42,8 +42,8 @@ type Embedder interface {
 // Progress is reported while a root is indexed.
 type Progress struct {
 	Root    string
-	Total   int // files that need work in this run
-	Done    int // finished (indexed, failed or skipped)
+	Total   int // files this run will process (text, documents, PDFs)
+	Done    int // finished: indexed, failed, skipped or postponed
 	Failed  int
 	Skipped int // over the free-tier limit
 }
@@ -64,13 +64,14 @@ type Indexer struct {
 
 // Stats summarize one run over a root.
 type Stats struct {
-	Scan     scan.Stats
-	Indexed  int
-	Failed   int
-	Skipped  int
-	Deleted  int // removed from the index because they no longer exist
-	Thumbs   []string
-	Deferred int // PDFs with pages left for a later pass
+	Scan      scan.Stats
+	Indexed   int
+	Failed    int
+	Skipped   int      // over the free-tier limit
+	Postponed int      // PDF engine busy: retried next run
+	Deleted   int      // removed from the index because they no longer exist
+	Thumbs    []string // thumbnails of deleted files, for the caller to remove
+	Deferred  int      // PDFs with pages left for a later pass (Phase 4)
 }
 
 // ErrEmbedder means the embedding server is not working; the run stops instead of
@@ -79,9 +80,10 @@ var ErrEmbedder = errors.New("index: embedding server failed")
 
 // job is one file that needs (re)indexing.
 type job struct {
-	id   int64
-	file scan.File
-	prio int // lower runs first
+	id         int64
+	file       scan.File
+	prio       int  // lower runs first
+	hadContent bool // already counted in the free-tier total
 }
 
 // IndexRoot scans root, removes files that disappeared, and indexes new or changed files.
@@ -92,7 +94,7 @@ func (ix *Indexer) IndexRoot(ctx context.Context, root store.Root) (Stats, error
 		return st, err
 	}
 
-	// 1. Scan: record every file; collect the ones that need work.
+	// 1. Scan: record every file; collect the ones that need work in this phase.
 	seen := map[string]bool{}
 	var jobs []job
 	now := ix.now()
@@ -101,12 +103,21 @@ func (ix *Indexer) IndexRoot(ctx context.Context, root store.Root) (Stats, error
 		id, changed, err := ix.Store.UpsertFile(ctx, store.File{
 			RootID: root.ID, Path: f.Path, Name: f.Name, Ext: f.Ext, Kind: f.Kind, Size: f.Size, MTime: f.ModTime,
 		})
+		if err != nil || !changed {
+			return err
+		}
+		switch {
+		case f.Kind == scan.KindOther:
+			// Nothing to read: the file-name row is all there is.
+			return ix.Store.SetFileResult(ctx, id, store.StatusDone, "", "", "")
+		case !handled(f.Kind):
+			return nil // images, audio, video: pending for a later phase
+		}
+		had, err := ix.Store.HasContent(ctx, id)
 		if err != nil {
 			return err
 		}
-		if changed {
-			jobs = append(jobs, job{id: id, file: f, prio: priority(f, now)})
-		}
+		jobs = append(jobs, job{id: id, file: f, prio: priority(f, now), hadContent: had})
 		return nil
 	})
 	if err != nil {
@@ -114,26 +125,10 @@ func (ix *Indexer) IndexRoot(ctx context.Context, root store.Root) (Stats, error
 		return st, err
 	}
 
-	// 2. Files recorded before but not found now were deleted (P-5). Only after a
-	// complete scan; folders that could not be read keep their files.
-	if st.Scan.Errors == 0 {
-		known, err := ix.Store.FilesInRoot(ctx, root.ID)
-		if err != nil {
-			return st, err
-		}
-		for _, p := range known {
-			if seen[strings.ToUpper(p)] {
-				continue
-			}
-			found, thumbs, err := ix.Store.DeleteFile(ctx, p)
-			if err != nil {
-				return st, err
-			}
-			if found {
-				st.Deleted++
-				st.Thumbs = append(st.Thumbs, thumbs...)
-			}
-		}
+	// 2. Files recorded before but not found now were deleted (P-5). Files inside
+	// folders that could not be read this time are kept.
+	if err := ix.removeDeleted(ctx, root.ID, seen, st.Scan, &st); err != nil {
+		return st, err
 	}
 
 	// 3. Index changed files, most important first.
@@ -142,8 +137,45 @@ func (ix *Indexer) IndexRoot(ctx context.Context, root store.Root) (Stats, error
 	return st, err
 }
 
-// priority follows plan 9.10: recent files, then the main user folders, then documents.
-// Images, audio and video are not processed in Phase 1.
+func (ix *Indexer) removeDeleted(ctx context.Context, rootID int64, seen map[string]bool, sc scan.Stats, st *Stats) error {
+	if sc.Errors > len(sc.FailedDirs) {
+		return nil // too many unreadable folders to know which files are really gone
+	}
+	failed := make([]string, len(sc.FailedDirs))
+	for i, d := range sc.FailedDirs {
+		failed[i] = strings.ToUpper(d) + `\`
+	}
+	known, err := ix.Store.FilesInRoot(ctx, rootID)
+	if err != nil {
+		return err
+	}
+	for _, p := range known {
+		key := strings.ToUpper(p)
+		if seen[key] || underAny(key, failed) {
+			continue
+		}
+		found, thumbs, err := ix.Store.DeleteFile(ctx, p)
+		if err != nil {
+			return err
+		}
+		if found {
+			st.Deleted++
+			st.Thumbs = append(st.Thumbs, thumbs...)
+		}
+	}
+	return nil
+}
+
+func underAny(key string, dirs []string) bool {
+	for _, d := range dirs {
+		if strings.HasPrefix(key, d) {
+			return true
+		}
+	}
+	return false
+}
+
+// priority follows plan 9.10: recent files, then the main user folders.
 func priority(f scan.File, now time.Time) int {
 	p := 0
 	if now.Sub(time.Unix(0, f.ModTime)) > 30*24*time.Hour {
@@ -152,11 +184,6 @@ func priority(f scan.File, now time.Time) int {
 	lower := strings.ToLower(f.Path)
 	if !strings.Contains(lower, `\desktop\`) && !strings.Contains(lower, `\documents\`) && !strings.Contains(lower, `\downloads\`) {
 		p += 10
-	}
-	switch f.Kind {
-	case scan.KindText, scan.KindDoc, scan.KindPDF:
-	default:
-		p += 1
 	}
 	return p
 }
@@ -169,83 +196,21 @@ type extracted struct {
 	err  error
 }
 
+// freeTier tracks how many files have content, shared by the feeder and the store stage.
+type freeTier struct {
+	licensed bool
+	used     atomic.Int64
+}
+
+// allows reports whether j may get (new) content. Files that already had content keep
+// their slot: re-indexing an edited file never pushes it out (plan L-3).
+func (f *freeTier) allows(j job) bool {
+	return f.licensed || j.hadContent || f.used.Load() < FreeLimit
+}
+
 func (ix *Indexer) run(ctx context.Context, rootPath string, jobs []job, st *Stats) error {
 	prog := Progress{Root: rootPath, Total: len(jobs)}
-	report := func() {
-		if ix.OnProgress != nil {
-			ix.OnProgress(prog)
-		}
-	}
-
-	count, err := ix.Store.CountContentIndexed(ctx)
-	if err != nil {
-		return err
-	}
-	var used, feederSkipped atomic.Int64 // shared by the feeder and the store stage
-	used.Store(int64(count))
-	licensed := ix.Licensed != nil && ix.Licensed()
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	// Stage 1: extraction workers.
-	todo := make(chan job)
-	results := make(chan extracted)
-	var wg sync.WaitGroup
-	for range ix.workers() {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := range todo {
-				r := extracted{job: j}
-				r.doc, r.err = extract.File(j.file.Path)
-				if r.err == nil {
-					r.hash = contentHash(j.file.Kind, r.doc)
-				}
-				select {
-				case results <- r:
-				case <-ctx.Done():
-					return
-				}
-			}
-		}()
-	}
-	go func() {
-		defer close(todo)
-		for _, j := range jobs {
-			if j.file.Kind == scan.KindOther {
-				// Nothing to read: the file-name row is all there is.
-				ix.Store.SetFileResult(ctx, j.id, store.StatusDone, "", "", "")
-				continue
-			}
-			if !handled(j.file.Kind) {
-				continue // images, audio, video: pending for a later phase
-			}
-			if !licensed && used.Load() >= FreeLimit {
-				feederSkipped.Add(1)
-				// Mark the rest skipped without reading them; already indexed files stay
-				// searchable (L-3).
-				ix.Store.SetFileResult(ctx, j.id, store.StatusSkipped, "", "", "free version limit reached")
-				continue
-			}
-			select {
-			case todo <- j:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
-	go func() { wg.Wait(); close(results) }()
-
-	// Stage 2: embed and store, one file at a time.
-	for r := range results {
-		status, err := ix.store(ctx, r, licensed, &used)
-		if err != nil {
-			cancel()
-			for range results { // let the workers finish
-			}
-			return err
-		}
+	finish := func(status string) {
 		prog.Done++
 		switch status {
 		case store.StatusDone, store.StatusPartial:
@@ -259,44 +224,129 @@ func (ix *Indexer) run(ctx context.Context, rootPath string, jobs []job, st *Sta
 		case store.StatusSkipped:
 			st.Skipped++
 			prog.Skipped++
+		case store.StatusPending:
+			st.Postponed++
 		}
-		report()
+		if ix.OnProgress != nil {
+			ix.OnProgress(prog)
+		}
 	}
-	st.Skipped += int(feederSkipped.Load())
+
+	count, err := ix.Store.CountContentIndexed(ctx)
+	if err != nil {
+		return err
+	}
+	tier := &freeTier{licensed: ix.Licensed != nil && ix.Licensed()}
+	tier.used.Store(int64(count))
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Stage 1: extraction workers.
+	todo := make(chan job)
+	results := make(chan extracted)
+	var wg sync.WaitGroup
+	for range ix.workers() {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range todo {
+				if ctx.Err() != nil {
+					return // cancelled: don't start another (possibly slow) extraction
+				}
+				r := extracted{job: j}
+				r.doc, r.err = extract.File(j.file.Path)
+				if r.err == nil {
+					r.hash = contentHash(j.file.Kind, r.doc)
+				}
+				select {
+				case results <- r:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+	// The feeder skips files over the free limit without reading them. Skips are
+	// reported to the store stage through results so progress stays in one goroutine.
+	// It is part of wg: results must not close while the feeder can still send.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		defer close(todo)
+		for _, j := range jobs {
+			if !tier.allows(j) {
+				select {
+				case results <- extracted{job: j, err: errOverLimit}:
+				case <-ctx.Done():
+					return
+				}
+				continue
+			}
+			select {
+			case todo <- j:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	go func() { wg.Wait(); close(results) }()
+
+	// Stage 2: embed and store, one file at a time.
+	var runErr error
+	for r := range results {
+		if runErr != nil {
+			continue // draining after a fatal error so the workers can exit
+		}
+		status, err := ix.store(ctx, r, tier)
+		if err != nil {
+			runErr = err
+			cancel()
+			continue
+		}
+		finish(status)
+	}
+	if runErr != nil {
+		return runErr
+	}
 	return ctx.Err()
 }
 
+var errOverLimit = errors.New("free version limit reached")
+
 // store handles one extracted file and returns the status it recorded.
-func (ix *Indexer) store(ctx context.Context, r extracted, licensed bool, used *atomic.Int64) (string, error) {
+func (ix *Indexer) store(ctx context.Context, r extracted, tier *freeTier) (string, error) {
 	id := r.job.id
-	fail := func(msg string) (string, error) {
-		return store.StatusFailed, ix.Store.SetFileResult(ctx, id, store.StatusFailed, "", "", msg)
+	set := func(status, hash, msg string) (string, error) {
+		return status, ix.Store.SetFileResult(ctx, id, status, "", hash, msg)
 	}
-	if r.err != nil {
-		if errors.Is(r.err, extract.ErrPDFBusy) {
-			return store.StatusPending, nil // not the file's fault: retried on the next run
-		}
-		return fail(r.err.Error())
+	switch {
+	case errors.Is(r.err, errOverLimit):
+		return set(store.StatusSkipped, "", errOverLimit.Error())
+	case errors.Is(r.err, extract.ErrPDFBusy):
+		return store.StatusPending, nil // not the file's fault: retried on the next run
+	case r.err != nil:
+		return set(store.StatusFailed, "", r.err.Error())
 	}
-	if !licensed && used.Load() >= FreeLimit {
-		return store.StatusSkipped, ix.Store.SetFileResult(ctx, id, store.StatusSkipped, "", "", "free version limit reached")
+	if !tier.allows(r.job) {
+		// The limit was reached while this file was being extracted.
+		return set(store.StatusSkipped, "", errOverLimit.Error())
 	}
 
 	status := store.StatusDone
 	if r.doc.MorePages {
-		status = store.StatusPartial
+		status = store.StatusPartial // remaining pages: deferred job (Phase 4)
 	}
 
 	// Identical content already indexed: copy instead of embedding again.
 	if r.hash != "" && status == store.StatusDone {
-		if src, ok, err := ix.Store.FileWithContent(ctx, r.hash, id); err != nil {
+		copied, err := ix.Store.CopyDuplicate(ctx, r.hash, id)
+		if err != nil {
 			return "", err
-		} else if ok {
-			if err := ix.Store.CopyContent(ctx, src, id); err != nil {
-				return "", err
-			}
-			used.Add(1)
-			return status, ix.Store.SetFileResult(ctx, id, status, "", r.hash, "")
+		}
+		if copied {
+			ix.account(tier, r.job, true)
+			return set(status, r.hash, "")
 		}
 	}
 
@@ -305,15 +355,23 @@ func (ix *Indexer) store(ctx context.Context, r extracted, licensed bool, used *
 		if errors.Is(err, ErrEmbedder) {
 			return "", err
 		}
-		return fail(err.Error())
+		return set(store.StatusFailed, "", err.Error())
 	}
 	if err := ix.Store.ReplaceContent(ctx, id, items); err != nil {
 		return "", err
 	}
-	if len(items) > 0 {
-		used.Add(1)
+	ix.account(tier, r.job, len(items) > 0)
+	return set(status, r.hash, "")
+}
+
+// account updates the free-tier count after a file's content was replaced.
+func (ix *Indexer) account(tier *freeTier, j job, hasContent bool) {
+	switch {
+	case hasContent && !j.hadContent:
+		tier.used.Add(1)
+	case !hasContent && j.hadContent:
+		tier.used.Add(-1)
 	}
-	return status, ix.Store.SetFileResult(ctx, id, status, "", r.hash, "")
 }
 
 // items chunks the document and embeds the passages. Mostly-numeric text (data
@@ -340,10 +398,12 @@ func (ix *Indexer) items(ctx context.Context, r extracted) ([]store.Item, error)
 	if len(toEmbed) > 0 {
 		vecs, err := ix.Embedder.EmbedPassages(ctx, r.job.file.Name, toEmbed)
 		if err != nil {
-			if errors.Is(err, embed.ErrServer) || errors.Is(err, context.Canceled) {
-				return nil, fmt.Errorf("%w: %v", ErrEmbedder, err)
+			// Only an error about this input blames the file. Anything else (server down,
+			// broken output, timeout, cancel) stops the run so files are not wrongly failed.
+			if errors.Is(err, embed.ErrInput) {
+				return nil, err
 			}
-			return nil, err
+			return nil, fmt.Errorf("%w: %v", ErrEmbedder, err)
 		}
 		if len(vecs) != len(toEmbed) {
 			return nil, fmt.Errorf("%w: got %d vectors for %d passages", ErrEmbedder, len(vecs), len(toEmbed))
@@ -379,8 +439,7 @@ func contentHash(kind string, d extract.Doc) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// handled reports the kinds this phase extracts. "other" files need nothing beyond
-// their name row, which UpsertFile already created.
+// handled reports the kinds this phase extracts.
 func handled(kind string) bool {
 	switch kind {
 	case scan.KindText, scan.KindDoc, scan.KindPDF:

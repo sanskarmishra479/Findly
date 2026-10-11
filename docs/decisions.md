@@ -129,3 +129,11 @@ Test PC: Intel i5-12450H (8 cores / 12 threads), NVIDIA RTX 2050 (Vulkan), llama
   - **Memory:** `--ctx-size 4096 --parallel 2` → llama-server 299 MB working set / 437 MB private (was 664 / 758 MB; budget 600 MB). `--no-webui` → `--no-ui` (deprecated).
   - `sidecar.Stop` terminates the whole job (grandchildren too) and `cmd.WaitDelay` = 2 s; `Tail` drops oversized buffers. Embeddings must be exactly 768-d. `vecfmt.ToInt8` returns an empty vector for values too small to scale. Synthetic recall test: binary top-200 recall@10 = 1.00 (real-model recall is measured in evals).
   - Accepted: a child could start grandchildren before it is assigned to the job object (llama-server starts none).
+- **2026-10-11 — P1-T6 review fixes (index):**
+  - **L-3 bug (confirmed):** editing an already-indexed file while at the 300-file limit marked it `skipped`, which deleted its content. Jobs now carry `hadContent`; such files always keep their slot, and re-indexing never counts them twice (second confirmed bug: 10 wasted slots).
+  - Only `embed.ErrInput` fails a file; any other embedder error (crash, reset, timeout, NaN) stops the run with `ErrEmbedder` and leaves files pending. Failed files are retried after 24 h (`store.RetryFailedAfter`; failures like a locked file are often temporary).
+  - Deleted-file cleanup skips only folders that could not be read this run (`scan.Stats.FailedDirs`, up to 1,000), instead of being turned off for the whole root.
+  - Progress: `Total` counts only files this phase processes; images/audio/video stay pending without being queued; `other` files are marked done during the scan. Feeder skips flow through the results channel (one goroutine owns progress). The feeder is in the WaitGroup so `results` never closes while it can still send.
+  - Workers check for cancellation before starting an extraction.
+  - Dedupe lookup + copy are one transaction (`store.CopyDuplicate`), so a source deleted in between can't produce an empty "done" copy. Known: copied vectors keep the source file's name as embedding title.
+  - **Phase 4 (recorded):** partial PDFs (`status=partial`) are not finished yet; the deferred job and saving `LastPage` belong to Phase 4 task 4.
