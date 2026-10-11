@@ -59,3 +59,10 @@ Test PC: Intel i5-12450H (8 cores / 12 threads), NVIDIA RTX 2050 (Vulkan), llama
 - llama-server warns that **audio input is experimental** in llama.cpp ("may have reduced quality"). Track before Phase 6.
 - Query embedding meets the Section 12 budget on CPU (< 80 ms).
 - Not yet done: timings on a low-end PC. Open: explicit `--pooling` (model default works; leave unset).
+
+## Phase 1
+- **2026-10-11 — dependency check: `golang.org/x/sys` v0.49.0.** Maintained by the Go team, BSD-3 license, used for raw Windows file APIs (`CreateFile`, `FindFirstFile`). No govulncheck findings reached by our code.
+- **2026-10-11 — `appfs` uses `os.Root`** (stdlib, Go 1.24+) to confine all writes to `%LOCALAPPDATA%\Findly`. Tests confirm writes and deletes through a junction pointing outside are refused, and removing the junction removes only the link.
+- **2026-10-11 — Go 1.27.0 has 9 stdlib vulnerabilities** (govulncheck), fixed in **1.27.2**. One is directly relevant: GO-2026-6604 "Root.Mkdir(All) can follow junctions out of the root on Windows". Our simple junction test does not reproduce it, but we must build with ≥ 1.27.2. Pending: upgrade toolchain.
+- **2026-10-11 — safefs reparse rule:** only *name-surrogate* reparse points (symlinks, junctions, mount points) are treated as links and skipped. Other reparse points (downloaded OneDrive files, WOF-compressed system files, dedup) are normal files. `Open` opens with `FILE_FLAG_OPEN_REPARSE_POINT` first so a file swapped for a link after the check is still refused.
+- **Known gap:** the symlink-file test is skipped unless Developer Mode is on (creating symlinks needs that privilege); the junction test covers directory links.

@@ -15,4 +15,14 @@
 - [ ] T7b Timings on a low-end PC (optional, when one is available)
 
 ## Phase 1 — Text engine CLI
-- [ ] not started
+- [x] T1 `safefs` (read-only, share flags, cloud-only + link skip, long paths) + `appfs` (os.Root, atomic writes) with tests
+- [ ] T1b Upgrade Go toolchain to >= 1.27.2 (GO-2026-6604 and 8 other stdlib vulns)
+- [ ] T2 `store`
+- [ ] T3 `scan`
+- [ ] T4 `extract`
+- [ ] T5 `chunk`, `embed`, `vecfmt`
+- [ ] T6 `index`
+- [ ] T7 `search`
+- [ ] T8 CLI index/search/stats
+- [ ] T9 evals
+- [ ] T10 file-integrity test
