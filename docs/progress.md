@@ -5,13 +5,14 @@
 - [x] Go module `github.com/sanskarmishra479/findly`
 
 ## Phase 0 — Model spike
-- [ ] T1 `scripts/fetch-llama.ps1` (pinned b11552, CPU + Vulkan, SHA-256 verified) — written, not yet run
-- [ ] T2 `scripts/fetch-model.ps1` (Q8_0 text + mmproj, SHA-256 verified) — written, not yet run
-- [ ] T3 Confirm llama-server flags + request formats for text / image / audio
-- [ ] T4 `cmd/cli spike`
-- [ ] T5 Cross-modal similarity check
-- [ ] T6 CPU vs Vulkan vectors; save `testdata/reference_vectors.json`
-- [ ] T7 Timings
+- [x] T1 `scripts/fetch-llama.ps1` (pinned b11552, CPU + Vulkan, SHA-256 verified)
+- [x] T2 `scripts/fetch-model.ps1` (Q8_0 text + mmproj, SHA-256 verified)
+- [x] T3 llama-server flags + request formats for text / image / audio (docs/decisions.md)
+- [x] T4 `cli spike`
+- [x] T5 Cross-modal similarity check: all pass
+- [x] T6 CPU vs Vulkan: worst cosine 0.99982; `testdata/reference_vectors.json` saved; `cli compare`
+- [x] T7 Timings on dev PC (i5-12450H + RTX 2050)
+- [ ] T7b Timings on a low-end PC (optional, when one is available)
 
 ## Phase 1 — Text engine CLI
 - [ ] not started

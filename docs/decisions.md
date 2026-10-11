@@ -31,4 +31,31 @@ Record of what was decided and why. Newest at the bottom of each section.
   Start the process with a **clean environment** (only `SystemRoot`, `PATH`, `LLAMA_API_KEY`): llama-server reads `LLAMA_ARG_*` and `HF_TOKEN` from env, and has experimental `--tools` (read_file, grep…) and an MCP proxy. A stray env var must never turn those on. Never pass `--tools`, `--media-path`, `-hf`, `--embd-gemma-default`.
 - **2026-10-11** `--ubatch-size` must cover the whole input for embeddings (non-causal); 2048 for the spike (30 s audio ≈ 750 tokens). Image budget flags: `--image-min-tokens` / `--image-max-tokens`.
 - **2026-10-11 — dependency policy:** stable, maintained, security-checked libraries only; prefer stdlib and `golang.org/x`. Every dependency is checked (release status, maintenance, license, `govulncheck`) and recorded here. Global hotkey: use `RegisterHotKey` via `golang.org/x/sys/windows` instead of `golang.design/x/hotkey`. Wails v3 stability to be checked before Phase 3.
-- Open: pooling flag, image token budget control (70 vs 280), whether DigUp's patch is still needed, CPU vs Vulkan vector match.
+
+## Phase 0 results (2026-10-11)
+Test PC: Intel i5-12450H (8 cores / 12 threads), NVIDIA RTX 2050 (Vulkan), llama.cpp b11552, Q8_0 text + Q8_0 mmproj, 256-d vectors.
+
+- **Cross-modal works.** Text↔image and text↔audio pairing pass at every image budget:
+
+  | Pair | 70 tok | 280 tok | 676 tok (server default) |
+  |---|---|---|---|
+  | "a dog on the beach" vs dog photo / cat photo | 0.781 / 0.660 | 0.764 / 0.619 | 0.744 / 0.621 |
+  | "a cat sitting outside" vs cat / dog | 0.773 / 0.633 | 0.739 / 0.597 | 0.735 / 0.581 |
+  | "where they talk about sleep" vs audio / dog text vs audio | 0.798 / 0.560 | same | same |
+
+- **Image budget must be set explicitly.** Without flags, llama-server sizes images by resolution (1536×1024 → 676 tokens, 24 s each on CPU), not the model's 280 default. Use `--image-min-tokens N --image-max-tokens N`. First pass = **70** (actual 64 tokens).
+- **CPU vs Vulkan match:** worst cosine **0.99982** (≥ 0.999 required). Vulkan accepted on this PC. `cli compare` implements the check; CPU vectors saved as `testdata/reference_vectors.json` (image budget 70).
+- **Timings** (warm; per item, one request each, includes decoding a 2.4 MB PNG):
+
+  | Item | CPU | Vulkan (RTX 2050) |
+  |---|---|---|
+  | Query text (~14 tokens) | 30–45 ms | 15–20 ms |
+  | Image, 70 tokens | 1.5–1.6 s | 0.4–0.5 s |
+  | Image, 280 tokens | 6.7 s | not measured |
+  | Audio clip (837 tokens) | 5.7 s | 0.8 s |
+
+- **Vulkan first run:** first image and first audio take ~50–60 s (shader compile). The driver caches it, so later launches are fast. The app must show "preparing GPU…" on first run and not mistake this for a hang.
+- **DigUp's llama.cpp patch is not needed:** upstream b11552 handles text, image and audio embeddings without patches.
+- llama-server warns that **audio input is experimental** in llama.cpp ("may have reduced quality"). Track before Phase 6.
+- Query embedding meets the Section 12 budget on CPU (< 80 ms).
+- Not yet done: timings on a low-end PC. Open: explicit `--pooling` (model default works; leave unset).
