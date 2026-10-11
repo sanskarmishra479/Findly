@@ -97,7 +97,10 @@ func tidy(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	blank := 0
-	for _, line := range strings.Split(s, "\n") {
+	for rest, more := s, true; more; {
+		// strings.Cut walks the lines without building a slice of millions of strings.
+		var line string
+		line, rest, more = strings.Cut(rest, "\n")
 		line = strings.TrimRightFunc(strings.Map(func(r rune) rune {
 			if r == '\t' || !unicode.IsControl(r) && r != 0xFEFF {
 				return r
@@ -120,7 +123,10 @@ func tidy(s string) string {
 
 // cutUTF8 shortens s to at most n bytes without splitting a character.
 func cutUTF8(s string, n int) string {
-	for n > 0 && n < len(s) && s[n]&0xC0 == 0x80 {
+	if n >= len(s) {
+		return s
+	}
+	for n > 0 && s[n]&0xC0 == 0x80 {
 		n--
 	}
 	return s[:n]

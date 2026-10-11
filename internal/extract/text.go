@@ -37,8 +37,9 @@ func plainText(path string, limit int64) (string, error) {
 	return decodeText(b), nil
 }
 
-// decodeText detects the encoding: UTF-8 (with or without BOM), UTF-16 with BOM, and
-// falls back to Windows-1252 (the classic Notepad "ANSI" on Western PCs).
+// decodeText detects the encoding: UTF-8 (with or without BOM, tolerating a few broken
+// bytes), UTF-16 with or without BOM, and falls back to Windows-1252 (the classic
+// Notepad "ANSI" on Western PCs).
 func decodeText(b []byte) string {
 	switch {
 	case bytes.HasPrefix(b, []byte{0xEF, 0xBB, 0xBF}):
@@ -47,11 +48,62 @@ func decodeText(b []byte) string {
 		return decodeUTF16(b[2:], false)
 	case bytes.HasPrefix(b, []byte{0xFE, 0xFF}):
 		return decodeUTF16(b[2:], true)
-	case utf8.Valid(b):
+	}
+	if le, ok := looksUTF16(b); ok {
+		return decodeUTF16(b, !le)
+	}
+	valid, invalid := utf8Stats(b)
+	switch {
+	case invalid == 0:
 		return string(b)
+	case valid >= invalid:
+		// Real UTF-8 with a few damaged bytes: keep it UTF-8, mark the damage. (A
+		// Windows-1252 file with accents almost never forms valid UTF-8 sequences.)
+		return strings.ToValidUTF8(string(b), "�")
 	default:
 		return decodeWindows1252(b)
 	}
+}
+
+// utf8Stats counts valid multi-byte characters and invalid bytes.
+func utf8Stats(b []byte) (multibyte, invalid int) {
+	for len(b) > 0 {
+		r, size := utf8.DecodeRune(b)
+		switch {
+		case r == utf8.RuneError && size == 1:
+			invalid++
+		case size > 1:
+			multibyte++
+		}
+		b = b[size:]
+	}
+	return multibyte, invalid
+}
+
+// looksUTF16 detects UTF-16 without a BOM: in mostly-ASCII or mostly-one-script text,
+// one of every two bytes is zero (or the same high byte), and the other half has no NULs.
+func looksUTF16(b []byte) (littleEndian, ok bool) {
+	n := min(len(b), 4096) &^ 1
+	if n < 8 {
+		return false, false
+	}
+	var zeroEven, zeroOdd int
+	for i := 0; i < n; i += 2 {
+		if b[i] == 0 {
+			zeroEven++
+		}
+		if b[i+1] == 0 {
+			zeroOdd++
+		}
+	}
+	pairs := n / 2
+	switch {
+	case zeroOdd*10 >= pairs*4 && zeroEven*20 < pairs: // "H\0i\0" → little-endian
+		return true, true
+	case zeroEven*10 >= pairs*4 && zeroOdd*20 < pairs: // "\0H\0i" → big-endian
+		return false, true
+	}
+	return false, false
 }
 
 func decodeUTF16(b []byte, bigEndian bool) string {
@@ -76,11 +128,7 @@ func decodeWindows1252(b []byte) string {
 	var sb strings.Builder
 	sb.Grow(len(b))
 	for _, c := range b {
-		if c >= 0x80 && c <= 0x9F {
-			sb.WriteRune(cp1252[c-0x80])
-		} else {
-			sb.WriteRune(rune(c))
-		}
+		sb.WriteRune(cp1252Rune(c))
 	}
 	return sb.String()
 }
