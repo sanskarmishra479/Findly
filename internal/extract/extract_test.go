@@ -219,3 +219,5 @@ func TestOutputIsCapped(t *testing.T) {
 		t.Fatalf("truncated=%v len=%d", d.Truncated, len(d.Text()))
 	}
 }
+
+func truncateFile(p string, size int64) error { return os.Truncate(p, size) }

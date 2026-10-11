@@ -19,7 +19,7 @@
 - [x] T1b Go toolchain 1.27.2 required in go.mod; govulncheck clean
 - [x] T2 `store` (SQLite schema, migrations, cascade deletes incl. FTS, vectors, free-tier count)
 - [x] T3 `scan` (skip rules, secrets, code projects, excludes, counts)
-- [x] T4 `extract` — txt, md, csv, log, json, html, docx, odt, rtf (PDF pending dependency check)
+- [x] T4 `extract` — txt, md, csv, log, json, html, docx, odt, rtf + PDF (go-pdfium wasm, sandboxed)
 - [ ] T5 `chunk`, `embed`, `vecfmt`
 - [ ] T6 `index`
 - [ ] T7 `search`

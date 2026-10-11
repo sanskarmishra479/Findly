@@ -39,6 +39,10 @@ type Section struct {
 type Doc struct {
 	Sections  []Section
 	Truncated bool // text was cut at MaxOutputText
+	// PDF only:
+	Pages     int   // total pages in the file
+	MorePages bool  // pages after PDFFirstPass were not extracted yet (deferred job)
+	NeedsOCR  []int // 1-based pages with almost no text: probably scanned
 }
 
 // Text returns all sections joined by blank lines.
@@ -67,6 +71,14 @@ func File(path string) (Doc, error) {
 		text, err = odt(path)
 	case ".rtf":
 		text, err = rtfFile(path)
+	case ".pdf":
+		doc, total, err := PDFPages(path, 0, PDFFirstPass)
+		if err != nil {
+			return Doc{}, err
+		}
+		doc.Pages = total
+		doc.MorePages = total > PDFFirstPass
+		return doc, nil
 	default:
 		return Doc{}, fmt.Errorf("%w: %s", ErrUnsupported, filepath.Ext(path))
 	}

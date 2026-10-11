@@ -1,0 +1,145 @@
+//go:build windows
+
+package extract
+
+import (
+	"bytes"
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/klippa-app/go-pdfium/requests"
+)
+
+// makePDF builds a small valid PDF with one line of Helvetica text per page
+// (an empty string makes a page with no text, like a scanned page).
+func makePDF(pages ...string) []byte {
+	var objs []string
+	n := len(pages)
+	// 1: catalog, 2: pages, 3: font, then per page: page object + content stream.
+	kids := make([]string, n)
+	for i := range pages {
+		kids[i] = fmt.Sprintf("%d 0 R", 4+2*i)
+	}
+	objs = append(objs,
+		"<< /Type /Catalog /Pages 2 0 R >>",
+		fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.Join(kids, " "), n),
+		"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+	)
+	for i, text := range pages {
+		stream := ""
+		if text != "" {
+			esc := strings.NewReplacer(`\`, `\\`, "(", `\(`, ")", `\)`).Replace(text)
+			stream = fmt.Sprintf("BT /F1 12 Tf 72 720 Td (%s) Tj ET", esc)
+		}
+		objs = append(objs,
+			fmt.Sprintf("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>", 5+2*i),
+			fmt.Sprintf("<< /Length %d >>\nstream\n%s\nendstream", len(stream), stream),
+		)
+	}
+	var b bytes.Buffer
+	b.WriteString("%PDF-1.4\n")
+	offsets := make([]int, len(objs))
+	for i, o := range objs {
+		offsets[i] = b.Len()
+		fmt.Fprintf(&b, "%d 0 obj\n%s\nendobj\n", i+1, o)
+	}
+	xref := b.Len()
+	fmt.Fprintf(&b, "xref\n0 %d\n0000000000 65535 f \n", len(objs)+1)
+	for _, off := range offsets {
+		fmt.Fprintf(&b, "%010d 00000 n \n", off)
+	}
+	fmt.Fprintf(&b, "trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n", len(objs)+1, xref)
+	return b.Bytes()
+}
+
+func TestPDFText(t *testing.T) {
+	p := write(t, "lease.pdf", makePDF("The clause about pets in the lease", "", "Rent is due on the first day of each month"))
+	d, err := File(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Pages != 3 || d.MorePages {
+		t.Errorf("Pages=%d MorePages=%v, want 3 false", d.Pages, d.MorePages)
+	}
+	if len(d.Sections) != 2 || d.Sections[0].Page != 1 || d.Sections[1].Page != 3 {
+		t.Fatalf("sections = %+v", d.Sections)
+	}
+	if !strings.Contains(d.Sections[0].Text, "clause about pets") || !strings.Contains(d.Sections[1].Text, "Rent") {
+		t.Errorf("text = %q", d.Text())
+	}
+	if len(d.NeedsOCR) != 1 || d.NeedsOCR[0] != 2 {
+		t.Errorf("NeedsOCR = %v, want [2]", d.NeedsOCR)
+	}
+}
+
+func TestPDFFirstPassAndRanges(t *testing.T) {
+	pages := make([]string, PDFFirstPass+5)
+	for i := range pages {
+		pages[i] = fmt.Sprintf("This is page number %d of the report", i+1)
+	}
+	p := write(t, "long.pdf", makePDF(pages...))
+	d, err := File(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Pages != len(pages) || !d.MorePages || len(d.Sections) != PDFFirstPass {
+		t.Fatalf("Pages=%d MorePages=%v sections=%d", d.Pages, d.MorePages, len(d.Sections))
+	}
+	// The deferred job reads the rest.
+	rest, total, err := PDFPages(p, PDFFirstPass, total(len(pages)))
+	if err != nil || total != len(pages) || len(rest.Sections) != 5 || rest.Sections[0].Page != PDFFirstPass+1 {
+		t.Fatalf("rest: sections=%d total=%d err=%v", len(rest.Sections), total, err)
+	}
+}
+
+func total(n int) int { return n }
+
+func TestPDFGarbageIsAnErrorNotACrash(t *testing.T) {
+	for name, data := range map[string][]byte{
+		"empty.pdf":     {},
+		"garbage.pdf":   []byte("%PDF-1.4\nthis is not really a pdf"),
+		"truncated.pdf": makePDF("hello world text")[:150],
+		"binary.pdf":    bytes.Repeat([]byte{0xFF, 0x00, 0x7B}, 10000),
+	} {
+		if _, err := File(write(t, name, data)); err == nil {
+			t.Logf("%s: no error (PDFium repaired it), acceptable", name)
+		}
+	}
+	// The engine still works after bad input.
+	if _, err := File(write(t, "ok.pdf", makePDF("still works fine"))); err != nil {
+		t.Fatalf("engine broken after bad PDFs: %v", err)
+	}
+}
+
+// Security: the PDF sandbox must not be able to open files from disk by path.
+func TestPDFSandboxHasNoDiskAccess(t *testing.T) {
+	secret := write(t, "secret.pdf", makePDF("top secret content"))
+	pool, err := pdfEngine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst, err := pool.GetInstance(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inst.Close()
+	// Try the paths the library's default config would expose (drive mounted at "/").
+	for _, p := range []string{secret, "/" + strings.ReplaceAll(secret[3:], `\`, "/"), "/Windows/win.ini"} {
+		p := p
+		if _, err := inst.OpenDocument(&requests.OpenDocument{FilePath: &p}); err == nil {
+			t.Errorf("sandbox opened %q from disk", p)
+		}
+	}
+}
+
+func TestPDFTooLarge(t *testing.T) {
+	p := write(t, "huge.pdf", nil)
+	if err := truncateFile(p, MaxPDFFile+1); err != nil {
+		t.Skip(err)
+	}
+	if _, err := File(p); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("got %v, want ErrTooLarge", err)
+	}
+}
