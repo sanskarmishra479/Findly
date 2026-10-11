@@ -99,3 +99,9 @@ Test PC: Intel i5-12450H (8 cores / 12 threads), NVIDIA RTX 2050 (Vulkan), llama
   - `AUTOINCREMENT` on roots/files/items: ids are never reused (protects the future in-memory vector cache). Migration 1 edited in place because it has never shipped.
   - Paths are matched by a `path_key` column (Go `strings.ToUpper`), since SQLite `NOCASE` only folds ASCII (`Ärger.txt` vs `ärger.txt`).
   - `Open` refuses UNC and `\?\` paths with a clear error (the index always lives under `%LOCALAPPDATA%`).
+- **2026-10-11 — extract (non-PDF):** txt/md/csv/log/json, html/htm, docx, odt, rtf. Only new dependency: **`golang.org/x/net` v0.61.0** (Go team, BSD-3; `html` tokenizer only; govulncheck clean). Everything else is stdlib (`archive/zip`, `encoding/xml`, `unicode/utf16`).
+  - Encodings: UTF-8 (± BOM), UTF-16 LE/BE with BOM, else Windows-1252 (own 32-entry table, no `x/text` dependency).
+  - Untrusted-input limits: text files 20 MB, JSON 5 MB, docx/odt 200 MB on disk, 100 MB uncompressed XML part (checked from the zip header **and** enforced with a LimitReader, so a lying header can't bypass it), 10 MB extracted text per file. Zip-bomb tests included. `encoding/xml` never resolves external entities (no XXE). RTF nesting capped at 1000 groups.
+  - HTML: visible text + `<title>`; script/style/noscript/template/svg/iframe/object dropped.
+  - `MostlyNumeric` (> 60 % digits/punctuation) for plan 9.3's "FTS only, no embedding" rule; applied by the indexer.
+  - Test-writing note: the file-writing tool turned `荤` inside a Go raw string into a literal character; such fixtures are written as `\` + `u8364` concatenations.
