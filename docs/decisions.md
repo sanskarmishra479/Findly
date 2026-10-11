@@ -82,3 +82,11 @@ Test PC: Intel i5-12450H (8 cores / 12 threads), NVIDIA RTX 2050 (Vulkan), llama
   - Paths are `COLLATE NOCASE` (Windows is case-insensitive).
   - Free tier counts files with status `done` or `partial` (`CountContentIndexed`).
 - **2026-10-11 — scan:** own recursion over the exported `safefs.ReadDir` (not `WalkDir`) so the scanner sees a folder's full listing before descending; needed to detect code projects (`.git`, `package.json`, `go.mod`, `Cargo.toml`, `pom.xml`), inside which only images are indexed. Unsupported files are still emitted as kind `other` (name-only search, plan 8). Secret-looking files (P-6) are skipped completely, not even name-indexed; added `id_ecdsa*`/`id_dsa*` to the plan's list. The "images smaller than 128×128" rule needs image headers, so it moves to `extract`. Unreadable folders are counted in `Stats.Errors` and skipped.
+- **2026-10-11 — P1-T3 review fixes (scan):**
+  - A root that is missing, unplugged, a link, cloud-only or not a folder returns `ErrBadRoot` — never "0 files". Otherwise an unplugged USB drive would look empty and its whole index would be purged.
+  - **Secret rules widened (P-6), decided by Claude, user can change:** folder names are checked too (`Passwords\`, `Secrets\`, `credentials\` are not entered). Added `credential`, `passwd`, `.ppk .jks .keystore .gpg .asc`, `.netrc`, `.git-credentials`, `.pgpass`, `accesskeys.csv`. Narrowed: `.env` / `.env.*` only (not `.envelope.txt`); `secret` does not match `secretary`/`secretariat`.
+  - Only the HIDDEN attribute skips entries; SYSTEM alone does not (a visible folder can get SYSTEM from a `desktop.ini` customization). Checked on the dev PC: Documents/Downloads/OneDrive have no SYSTEM attribute.
+  - OneDrive folders are reparse points with tag `0x9000701A` (cloud, not a name surrogate) → treated as normal folders. Verified on the dev PC (Pictures, Desktop, Documents live under OneDrive).
+  - Excludes are canonicalized (8.3 names, `\?\`, trailing `\`, case, `/`) and compared with `EqualFold`; drive-root excludes work.
+  - `safefs` clamps FILETIME conversion (a 1601 timestamp overflowed into the future).
+  - Counts only include files the callback accepted; cancellation checked every 256 entries.

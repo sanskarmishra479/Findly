@@ -320,7 +320,7 @@ func infoFromFindData(path string, fd *windows.Win32finddata) Info {
 		Path:       path,
 		Name:       filepath.Base(path),
 		Size:       int64(fd.FileSizeHigh)<<32 | int64(fd.FileSizeLow),
-		ModTime:    time.Unix(0, fd.LastWriteTime.Nanoseconds()),
+		ModTime:    fileTime(fd.LastWriteTime),
 		Attrs:      fd.FileAttributes,
 		ReparseTag: fd.Reserved0, // dwReserved0 holds the reparse tag (documented for FindFirstFile)
 	}
@@ -457,4 +457,23 @@ func longPath(path string) (string, error) {
 		return `\\?\UNC\` + p[2:], nil
 	}
 	return `\\?\` + p, nil
+}
+
+// fileTime converts a Windows FILETIME (100 ns steps since 1601) to time.Time.
+// Filetime.Nanoseconds overflows int64 for dates before 1678 or after 2262, which turned
+// an old file into one "modified in the future"; out-of-range values are clamped.
+func fileTime(ft windows.Filetime) time.Time {
+	const (
+		unixEpoch = 116444736000000000 // 1970-01-01 in FILETIME units
+		maxUnix   = (1<<63 - 1) / 100  // largest value that fits in int64 nanoseconds
+	)
+	v := uint64(ft.HighDateTime)<<32 | uint64(ft.LowDateTime)
+	if v <= unixEpoch {
+		return time.Unix(0, 0)
+	}
+	d := v - unixEpoch
+	if d > maxUnix {
+		d = maxUnix
+	}
+	return time.Unix(0, int64(d)*100)
 }

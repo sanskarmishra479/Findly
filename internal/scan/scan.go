@@ -7,10 +7,13 @@ package scan
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 
 	"github.com/sanskarmishra479/findly/internal/safefs"
+	"golang.org/x/sys/windows"
 )
 
 // File kinds.
@@ -60,24 +63,47 @@ var codeMarkers = map[string]bool{
 // Files never indexed, not even by name.
 var skipFileNames = map[string]bool{"thumbs.db": true, "desktop.ini": true}
 
-// Extensions of key, certificate, password-database and VPN files (P-6).
+// Extensions of key, certificate, keystore, password-database and VPN files (P-6).
 var secretExts = map[string]bool{
 	".pem": true, ".key": true, ".pfx": true, ".p12": true, ".kdbx": true, ".ovpn": true, ".env": true,
+	".ppk": true, ".jks": true, ".keystore": true, ".gpg": true, ".asc": true,
 }
 
-// IsSecretName reports file names that look like keys or secrets (P-6). Such files are
-// skipped completely, even inside folders the user chose.
+// Exact file names of credential stores.
+var secretNames = map[string]bool{
+	".netrc": true, "_netrc": true, ".git-credentials": true, ".pgpass": true, "accesskeys.csv": true,
+}
+
+// IsSecretName reports file or folder names that look like keys or secrets (P-6). Such
+// files, and everything inside such folders, are skipped completely, even inside folders
+// the user chose.
 func IsSecretName(name string) bool {
 	n := strings.ToLower(name)
 	switch {
-	case secretExts[filepath.Ext(n)],
-		strings.HasPrefix(n, ".env"),
+	case secretExts[filepath.Ext(n)], secretNames[n],
+		n == ".env", strings.HasPrefix(n, ".env."), // .env, .env.local — but not ".envelope.txt"
 		strings.HasPrefix(n, "id_rsa"), strings.HasPrefix(n, "id_ed25519"),
 		strings.HasPrefix(n, "id_ecdsa"), strings.HasPrefix(n, "id_dsa"),
-		strings.Contains(n, "password"), strings.Contains(n, "secret"):
+		strings.Contains(n, "password"), strings.Contains(n, "passwd"),
+		strings.Contains(n, "credential"),
+		containsSecret(n):
 		return true
 	}
 	return false
+}
+
+// containsSecret matches "secret" but not "secretary"/"secretariat" (meeting notes etc.).
+func containsSecret(n string) bool {
+	for i := 0; ; {
+		j := strings.Index(n[i:], "secret")
+		if j < 0 {
+			return false
+		}
+		i += j + len("secret")
+		if !strings.HasPrefix(n[i:], "ar") {
+			return true
+		}
+	}
 }
 
 // MaxSize is the largest non-video file considered (plan 9.3: 2 GB).
@@ -110,19 +136,50 @@ type Options struct {
 	Excludes []string
 }
 
+// ErrBadRoot is returned when the root itself cannot be scanned (missing, unplugged
+// drive, a link, cloud-only). Callers must NOT treat this as "the folder is empty":
+// purging the index for an unplugged USB drive would lose everything indexed from it.
+var ErrBadRoot = errors.New("scan: root folder is not available")
+
 // Root scans one chosen folder and calls fn for every file to index. fn may return an
-// error to stop the scan. Scanning stops early if ctx is cancelled.
+// error to stop the scan. Scanning stops early if ctx is cancelled. root must be a real
+// path (safefs.Canonical); unreadable subfolders are counted in Stats.Errors and skipped.
 func Root(ctx context.Context, root string, opts Options, fn func(File) error) (Stats, error) {
 	s := &scanner{
 		ctx:   ctx,
 		fn:    fn,
 		stats: Stats{Counts: map[string]int{}, Bytes: map[string]int64{}},
 	}
-	for _, e := range opts.Excludes {
-		s.excludes = append(s.excludes, strings.ToLower(filepath.Clean(e)))
+	root = filepath.Clean(root)
+	info, err := safefs.Stat(root)
+	switch {
+	case err != nil:
+		return s.stats, fmt.Errorf("%w: %v", ErrBadRoot, err)
+	case !info.IsDir(), info.IsLink(), info.IsCloudOnly():
+		return s.stats, fmt.Errorf("%w: %s is not a real local folder", ErrBadRoot, root)
 	}
-	err := s.dir(filepath.Clean(root), false)
-	return s.stats, err
+	entries, err := safefs.ReadDir(root)
+	if err != nil {
+		return s.stats, fmt.Errorf("%w: %v", ErrBadRoot, err)
+	}
+
+	for _, e := range opts.Excludes {
+		// Use the real long path so "C:\LONGFO~1", "\\?\C:\x" or a trailing "\" still match.
+		if c, err := safefs.Canonical(e); err == nil {
+			e = c
+		}
+		s.excludes = append(s.excludes, strings.TrimRight(filepath.Clean(e), `\`))
+	}
+	return s.stats, s.entries(entries, isCodeProject(entries))
+}
+
+func isCodeProject(entries []safefs.Info) bool {
+	for _, e := range entries {
+		if codeMarkers[strings.ToLower(e.Name)] {
+			return true
+		}
+	}
+	return false
 }
 
 type scanner struct {
@@ -139,23 +196,24 @@ func (s *scanner) dir(path string, inCodeProject bool) error {
 	entries, err := safefs.ReadDir(path)
 	if err != nil {
 		s.stats.Errors++
-		return nil // an unreadable folder must not stop the scan
+		return nil // an unreadable subfolder must not stop the scan
 	}
-	if !inCodeProject {
-		for _, e := range entries {
-			if codeMarkers[strings.ToLower(e.Name)] {
-				inCodeProject = true
-				break
+	return s.entries(entries, inCodeProject || isCodeProject(entries))
+}
+
+func (s *scanner) entries(entries []safefs.Info, inCodeProject bool) error {
+	for i, e := range entries {
+		if i%256 == 255 { // big flat folders: notice cancellation without waiting for the end
+			if err := s.ctx.Err(); err != nil {
+				return err
 			}
 		}
-	}
-
-	for _, e := range entries {
 		switch {
 		case e.IsLink():
 			s.stats.Links++
 			continue
-		case e.IsHidden():
+		case e.Attrs&windows.FILE_ATTRIBUTE_HIDDEN != 0:
+			// Only HIDDEN: a visible folder can get SYSTEM just from desktop.ini customization.
 			continue
 		case e.IsCloudOnly():
 			s.stats.CloudOnly++
@@ -166,6 +224,10 @@ func (s *scanner) dir(path string, inCodeProject bool) error {
 
 		if e.IsDir() {
 			if skipDirs[strings.ToLower(e.Name)] {
+				continue
+			}
+			if IsSecretName(e.Name) { // e.g. "Passwords", "Secrets", "credentials"
+				s.stats.Secret++
 				continue
 			}
 			if err := s.dir(e.Path, inCodeProject); err != nil {
@@ -198,9 +260,7 @@ func (s *scanner) file(e safefs.Info, inCodeProject bool) error {
 		s.stats.TooLarge++
 		return nil
 	}
-	s.stats.Counts[kind]++
-	s.stats.Bytes[kind] += e.Size
-	return s.fn(File{
+	err := s.fn(File{
 		Path:    e.Path,
 		Name:    e.Name,
 		Ext:     filepath.Ext(lower),
@@ -208,13 +268,22 @@ func (s *scanner) file(e safefs.Info, inCodeProject bool) error {
 		Size:    e.Size,
 		ModTime: e.ModTime.UnixNano(),
 	})
+	if err != nil {
+		return err
+	}
+	s.stats.Counts[kind]++
+	s.stats.Bytes[kind] += e.Size
+	return nil
 }
 
 // excluded reports whether path is an unticked folder or inside one.
 func (s *scanner) excluded(path string) bool {
-	p := strings.ToLower(path)
 	for _, ex := range s.excludes {
-		if p == ex || strings.HasPrefix(p, ex+`\`) {
+		if len(path) < len(ex) || !strings.EqualFold(path[:len(ex)], ex) {
+			continue
+		}
+		// Whole folder name must match: "C:\private" excludes "C:\private\x" but not "C:\privateer".
+		if len(path) == len(ex) || path[len(ex)] == '\\' || strings.HasSuffix(ex, `:`) {
 			return true
 		}
 	}

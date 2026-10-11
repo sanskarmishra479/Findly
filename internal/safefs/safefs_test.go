@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
@@ -428,5 +429,18 @@ func TestReadFileRejectsBadLimit(t *testing.T) {
 		if _, err := ReadFile(p, limit); err == nil {
 			t.Errorf("limit %d: expected error", limit)
 		}
+	}
+}
+
+func TestFileTimeClamps(t *testing.T) {
+	if got := fileTime(windows.Filetime{}); got.Unix() != 0 {
+		t.Errorf("1601 FILETIME = %v, want 1970", got)
+	}
+	if got := fileTime(windows.Filetime{HighDateTime: 0xFFFFFFFF, LowDateTime: 0xFFFFFFFF}); got.Year() < 2262 {
+		t.Errorf("max FILETIME = %v, want clamped far future", got)
+	}
+	want := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	if got := fileTime(windows.NsecToFiletime(want.UnixNano())); !got.Equal(want) {
+		t.Errorf("round trip = %v, want %v", got, want)
 	}
 }

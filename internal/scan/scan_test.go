@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"golang.org/x/sys/windows"
@@ -177,4 +178,100 @@ func setAttrs(t *testing.T, path string, attrs uint32) {
 	if err := windows.SetFileAttributes(p, attrs); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// Review finding 1: a missing or unusable root is an error, never "empty folder".
+func TestScanBadRootIsError(t *testing.T) {
+	root := tree(t, "a.txt")
+	outside := tree(t, "b.txt")
+	link := filepath.Join(root, "jump")
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, outside).CombinedOutput(); err != nil {
+		t.Fatalf("mklink: %v: %s", err, out)
+	}
+	for _, bad := range []string{filepath.Join(root, "missing"), link, filepath.Join(root, "a.txt"), "relative"} {
+		if _, err := Root(context.Background(), bad, Options{}, func(File) error { return nil }); !errors.Is(err, ErrBadRoot) {
+			t.Errorf("Root(%q) = %v, want ErrBadRoot", bad, err)
+		}
+	}
+}
+
+// Review findings 2+3: secret-named folders are skipped; look-alike names are not.
+func TestScanSecretFoldersAndLookalikes(t *testing.T) {
+	root := tree(t,
+		"Passwords/bank-logins.txt", "Secrets/keys.txt", "credentials/aws.txt",
+		"credentials.json", "service-credential.json", "accessKeys.csv", ".netrc", "putty.ppk", "release.jks",
+		".envelope.txt", "Secretary meeting.docx", "secretariat.txt", "envoy.txt",
+	)
+	got, _ := found(t, root, Options{})
+	equal(t, got, ".envelope.txt", "Secretary meeting.docx", "secretariat.txt", "envoy.txt")
+}
+
+func TestIsSecretName(t *testing.T) {
+	yes := []string{"top_secret.txt", "secretary_secrets.txt", "my.passwd", "x.GPG", ".env", ".env.production"}
+	no := []string{"secretary.docx", "Secretariat notes.pdf", ".envrc.txt", "environment.md"}
+	for _, n := range yes {
+		if !IsSecretName(n) {
+			t.Errorf("IsSecretName(%q) = false, want true", n)
+		}
+	}
+	for _, n := range no {
+		if IsSecretName(n) {
+			t.Errorf("IsSecretName(%q) = true, want false", n)
+		}
+	}
+}
+
+// Review finding 4: excludes match regardless of trailing slash, case or 8.3 short name.
+func TestScanExcludeForms(t *testing.T) {
+	root := tree(t, "Long Folder Name/a.txt", "keep.txt")
+	long := filepath.Join(root, "Long Folder Name")
+	forms := []string{long + `\`, strings.ToUpper(long), filepath.ToSlash(long)}
+	if short := shortName(long); short != "" && short != long {
+		forms = append(forms, short)
+	}
+	for _, ex := range forms {
+		got, _ := found(t, root, Options{Excludes: []string{ex}})
+		if len(got) != 1 || got[0] != "keep.txt" {
+			t.Errorf("exclude %q: got %v", ex, got)
+		}
+	}
+}
+
+// Review finding 6: counts only include files the callback accepted.
+func TestScanCountsOnlyAccepted(t *testing.T) {
+	root := tree(t, "a.txt")
+	stats, _ := Root(context.Background(), root, Options{}, func(File) error { return errors.New("stop") })
+	if stats.Counts[KindText] != 0 {
+		t.Errorf("counts = %v, want none", stats.Counts)
+	}
+}
+
+// Files over 2 GB are skipped, except videos. Sparse files avoid writing gigabytes.
+func TestScanTooLarge(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"huge.txt", "movie.mp4"} {
+		p := filepath.Join(root, name)
+		os.WriteFile(p, nil, 0o644)
+		if out, err := exec.Command("fsutil", "sparse", "setflag", p).CombinedOutput(); err != nil {
+			t.Skipf("fsutil sparse: %v: %s", err, out)
+		}
+		if err := os.Truncate(p, MaxSize+1); err != nil {
+			t.Skipf("truncate: %v", err)
+		}
+	}
+	got, stats := found(t, root, Options{})
+	equal(t, got, "movie.mp4")
+	if stats.TooLarge != 1 {
+		t.Errorf("TooLarge = %d, want 1", stats.TooLarge)
+	}
+}
+
+func shortName(p string) string {
+	p16, _ := windows.UTF16PtrFromString(p)
+	buf := make([]uint16, 1024)
+	n, err := windows.GetShortPathName(p16, &buf[0], uint32(len(buf)))
+	if err != nil || n == 0 {
+		return ""
+	}
+	return windows.UTF16ToString(buf[:n])
 }
