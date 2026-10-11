@@ -300,7 +300,7 @@ func TestOpenRejectsJunctionInParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readDir(filepath.Join(root, "jump")); !errors.Is(err, ErrLink) {
+	if _, err := ReadDir(filepath.Join(root, "jump")); !errors.Is(err, ErrLink) {
 		t.Fatalf("readDir through junction: got %v, want ErrLink", err)
 	}
 }

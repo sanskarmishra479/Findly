@@ -247,7 +247,7 @@ func WalkDir(root string, fn WalkFunc) error {
 }
 
 func walk(dir string, fn WalkFunc) error {
-	entries, err := readDir(dir)
+	entries, err := ReadDir(dir)
 	if err != nil {
 		info, _ := Stat(dir)
 		if err := fn(info, err); err != nil && !errors.Is(err, SkipDir) {
@@ -275,9 +275,9 @@ func walk(dir string, fn WalkFunc) error {
 	return nil
 }
 
-// readDir lists one directory with FindFirstFile/FindNextFile (metadata only).
+// ReadDir lists one directory with FindFirstFile/FindNextFile (metadata only).
 // It first proves the directory is reached without going through a link.
-func readDir(dir string) ([]Info, error) {
+func ReadDir(dir string) ([]Info, error) {
 	if err := checkDir(dir); err != nil {
 		return nil, err
 	}
