@@ -26,6 +26,8 @@ func main() {
 		err = runStats(os.Args[2:])
 	case "remove":
 		err = runRemove(os.Args[2:])
+	case "eval":
+		err = runEval(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -44,6 +46,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  search  \"<query>\"     search by words and meaning")
 	fmt.Fprintln(os.Stderr, "  stats                 show what is indexed")
 	fmt.Fprintln(os.Stderr, "  remove  <folder>      remove a folder and its index data")
+	fmt.Fprintln(os.Stderr, "  eval                  run evals/queries.jsonl on the eval testbed")
 	fmt.Fprintln(os.Stderr, "  spike   Phase 0: embed test text/images/audio and print similarities")
 	fmt.Fprintln(os.Stderr, "  compare Compare two spike vector files (CPU vs GPU check)")
 }

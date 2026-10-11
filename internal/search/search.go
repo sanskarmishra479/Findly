@@ -31,7 +31,9 @@ const (
 	exactBoost    = 0.05 // more than any single RRF rank difference near the top
 	snippetLength = 200
 	// MinSemantic drops semantic hits whose similarity is too low to mean anything.
-	MinSemantic = 0.25
+	// Calibrated with cli eval (2026-10-11): 0.60 keeps Recall@5 = 1.0 and cuts unrelated
+	// results from ~23 to ~5 per query; at 0.70 real answers start to drop out.
+	MinSemantic = 0.60
 )
 
 // QueryEmbedder embeds a search query. *embed.Server implements it.
@@ -63,6 +65,11 @@ type Searcher struct {
 	Store    *store.Store
 	Embedder QueryEmbedder // nil: keyword search only (e.g. model not downloaded yet)
 	Cache    *VectorCache
+	// MinScore drops semantic hits below this similarity; 0 means MinSemantic.
+	MinScore float64
+	// MaxBelowBest drops semantic hits more than this below the best hit; 0 means
+	// RelativeGap, negative disables it.
+	MaxBelowBest float64
 }
 
 // Keyword returns keyword results immediately (every keystroke). typing makes the last
@@ -116,12 +123,16 @@ func (s *Searcher) Semantic(ctx context.Context, raw string, fl store.Filter) ([
 	if err != nil {
 		return nil, err
 	}
-	scored := s.Cache.Nearest(&qv, Candidates)
+	scored := s.Cache.Nearest(&qv, Candidates, fl)
 	// Best item per file, by int8 score.
 	var order []int64
 	best := map[int64]Scored{}
+	floor := s.minScore()
+	if gap := s.gap(); gap > 0 && len(scored) > 0 {
+		floor = max(floor, float64(scored[0].Score)-gap)
+	}
 	for _, c := range scored {
-		if c.Score < MinSemantic {
+		if float64(c.Score) < floor {
 			break // sorted best first
 		}
 		if _, ok := best[c.FileID]; !ok {
@@ -201,7 +212,7 @@ func Fuse(q Query, keyword, semantic []Result) []Result {
 		if len(q.Phrases) > 0 {
 			ok := true
 			for _, p := range q.Phrases {
-				if !strings.Contains(hay, strings.ToLower(p)) && !r.Keyword {
+				if !strings.Contains(normalize(hay), normalize(strings.ToLower(p))) && !r.Keyword {
 					ok = false
 				}
 			}
@@ -209,7 +220,8 @@ func Fuse(q Query, keyword, semantic []Result) []Result {
 				continue // semantic-only hit without the required exact phrase
 			}
 		}
-		if exact != "" && strings.Contains(normalize(hay), normalize(exact)) {
+		// Whole words only: "cat" must not boost "concatenate".
+		if exact != "" && strings.Contains(" "+normalize(hay)+" ", " "+normalize(exact)+" ") {
 			r.Exact = true
 			r.Score += exactBoost
 		}
@@ -282,6 +294,7 @@ type VectorCache struct {
 	files []int64
 	bins  []vecfmt.Bin
 	q     []vecfmt.Int8
+	meta  map[int64]store.File // per file: path, kind, mtime (for filtering during the scan)
 }
 
 // Load replaces the cache with all vectors in the store.
@@ -289,9 +302,13 @@ func (c *VectorCache) Load(ctx context.Context, st *store.Store) error {
 	var items, files []int64
 	var bins []vecfmt.Bin
 	var qs []vecfmt.Int8
+	meta := map[int64]store.File{}
 	err := st.AllVectors(ctx, func(r store.VectorRow) error {
 		items = append(items, r.ItemID)
-		files = append(files, r.FileID)
+		files = append(files, r.File.ID)
+		if _, ok := meta[r.File.ID]; !ok {
+			meta[r.File.ID] = r.File
+		}
 		bins = append(bins, vecfmt.Bin(r.Vector.Bin))
 		qs = append(qs, vecfmt.Int8{I8: r.Vector.I8, Scale: r.Vector.Scale})
 		return nil
@@ -300,7 +317,7 @@ func (c *VectorCache) Load(ctx context.Context, st *store.Store) error {
 		return err
 	}
 	c.mu.Lock()
-	c.items, c.files, c.bins, c.q = items, files, bins, qs
+	c.items, c.files, c.bins, c.q, c.meta = items, files, bins, qs, meta
 	c.mu.Unlock()
 	return nil
 }
@@ -319,13 +336,25 @@ type Scored struct {
 	Score  float32
 }
 
-// Nearest returns up to n items closest to qv: the n smallest Hamming distances, then
-// sorted by int8 dot product (best first).
-func (c *VectorCache) Nearest(qv *embed.Vector, n int) []Scored {
+// Nearest returns up to n items closest to qv among files that pass fl: the n smallest
+// Hamming distances, then sorted by int8 dot product (best first). Filtering during the
+// scan (not afterwards) matters: with a narrow filter, the overall top 200 would usually
+// all be outside it.
+func (c *VectorCache) Nearest(qv *embed.Vector, n int, fl store.Filter) []Scored {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	filtered := !fl.Empty()
+	allowed := map[int64]bool{}
+	if filtered {
+		for id, f := range c.meta {
+			allowed[id] = fl.Match(f)
+		}
+	}
 	h := &maxHeap{}
 	for i := range c.bins {
+		if filtered && !allowed[c.files[i]] {
+			continue
+		}
 		d := vecfmt.Hamming(&qv.Bin, &c.bins[i])
 		if h.Len() < n {
 			heap.Push(h, cand{i, d})
@@ -356,4 +385,26 @@ func (h *maxHeap) Pop() any {
 	x := old[len(old)-1]
 	*h = old[:len(old)-1]
 	return x
+}
+
+func (s *Searcher) minScore() float64 {
+	if s.MinScore != 0 {
+		return s.MinScore
+	}
+	return MinSemantic
+}
+
+// RelativeGap: semantic hits more than this below the best hit are dropped. With
+// EmbeddingGemma, unrelated text scores ~0.5–0.68 and the right passage ~0.73–0.85, so a
+// result far below the best one is almost always noise.
+const RelativeGap = 0.08
+
+func (s *Searcher) gap() float64 {
+	switch {
+	case s.MaxBelowBest < 0:
+		return 0
+	case s.MaxBelowBest > 0:
+		return s.MaxBelowBest
+	}
+	return RelativeGap
 }

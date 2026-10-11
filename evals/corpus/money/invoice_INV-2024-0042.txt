@@ -1,0 +1,5 @@
+INVOICE INV-2024-0042
+Date: 15 March 2024
+Bill to: Northwind Analytics Ltd.
+Description: Data pipeline consulting, 32 hours at 95 dollars per hour.
+Total due: 3,040 dollars. Payment terms: 30 days.

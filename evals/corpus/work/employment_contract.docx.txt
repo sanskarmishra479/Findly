@@ -1,0 +1,7 @@
+Employment Contract
+Employer: Northwind Analytics Ltd. Employee: Ravi Kumar. Position: Data Engineer.
+Start date: 3 February 2025. Place of work: Pune office, with up to two remote days per week.
+Salary: 18,00,000 rupees per year, paid monthly.
+Probation: the first six months are a probation period.
+Termination: after probation either party may end this contract by giving two months of written notice. During probation the notice period is two weeks.
+Annual leave: 24 working days per calendar year.

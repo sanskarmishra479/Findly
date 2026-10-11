@@ -1,0 +1,31 @@
+{"query":"can I keep a cat in my apartment","expect":["home/lease.pdf#page=2"]}
+{"query":"when is the rent due each month","expect":["home/lease.pdf#page=3"]}
+{"query":"security deposit refund","expect":["home/lease.pdf#page=3"]}
+{"query":"how much notice do I need to give before quitting my job","expect":["work/employment_contract.docx"]}
+{"query":"INV-2024-0042","expect":["money/invoice_INV-2024-0042.txt"]}
+{"query":"invoice for the accessibility audit","expect":["money/invoice_INV-2023-0917.txt"]}
+{"query":"trouble falling asleep at night","expect":["personal/sleep_journal.md"]}
+{"query":"training schedule for a long distance race","expect":["personal/marathon_training.md"]}
+{"query":"how to bake bread with a starter","expect":["personal/sourdough_recipe.html"]}
+{"query":"chocolate dessert recipe","expect":["personal/chocolate_cake.odt"]}
+{"query":"temples and shrines I visited in Japan","expect":["personal/trip_to_kyoto.md"]}
+{"query":"what documents do I need to renew my passport","expect":["personal/passport_renewal.txt"]}
+{"query":"when were the brakes last replaced","expect":["personal/car_service_record.txt"]}
+{"query":"\"brake pads\"","expect":["personal/car_service_record.txt"]}
+{"query":"what did we decide in the planning meeting","expect":["work/meeting_notes_q3_planning.docx"]}
+{"query":"payment declined error","expect":["work/error_log_payment.html"]}
+{"query":"0x80070005","expect":["work/error_log_payment.html"]}
+{"query":"how do I reset the internet router","expect":["home/wifi_router_setup.txt"]}
+{"query":"tax deductions I claimed","expect":["money/tax_return_2024.pdf#page=2"]}
+{"query":"what time is my dentist appointment","expect":["personal/dentist_appointment.txt"]}
+{"query":"growing tomatoes in pots","expect":["home/garden_tomatoes.md"]}
+{"query":"is my laptop still under warranty","expect":["work/laptop_warranty.pdf"]}
+{"query":"heavy rain and flooding during the monsoon","expect":["personal/hindi_notes.txt"]}
+{"query":"मानसून की बारिश","expect":["personal/hindi_notes.txt"]}
+{"query":"rice dish with saffron","expect":["personal/receta_paella.md"]}
+{"query":"does my home insurance cover flood damage","expect":["home/insurance_policy_home.docx"]}
+{"query":"wedding date and venue","expect":["personal/wedding_invitation.html"]}
+{"query":"how much was the electricity bill","expect":["money/electricity_bill_july.txt"]}
+{"query":"dog vaccination","expect":["home/vet_visit_dog.txt"]}
+{"query":"list comprehension example","expect":["work/python_tips.md"]}
+{"query":"march bank statement","expect":["money/bank_statement_march.csv"]}

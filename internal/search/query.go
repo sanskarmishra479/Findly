@@ -3,6 +3,7 @@ package search
 import (
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Query is a parsed user query.
@@ -12,9 +13,28 @@ type Query struct {
 	Phrases []string // "quoted parts": must appear exactly (plan 9.11)
 }
 
+// Query size limits: a huge paste must not make every keystroke slow (the embedder also
+// cuts queries at 500 runes).
+const (
+	maxQueryRunes = 500
+	maxQueryWords = 32
+)
+
 // Parse splits the user's text into words and quoted phrases. It never fails.
-func Parse(raw string) Query {
-	q := Query{Raw: raw}
+func Parse(raw string) (q Query) {
+	if utf8.RuneCountInString(raw) > maxQueryRunes {
+		raw = string([]rune(raw)[:maxQueryRunes])
+	}
+	q = Query{Raw: raw}
+	// q is a named result, so this deferred trim changes what Parse returns.
+	defer func() {
+		if len(q.Words) > maxQueryWords {
+			q.Words = q.Words[:maxQueryWords]
+		}
+		if len(q.Phrases) > maxQueryWords {
+			q.Phrases = q.Phrases[:maxQueryWords]
+		}
+	}()
 	rest := raw
 	for {
 		start := strings.IndexByte(rest, '"')
@@ -52,7 +72,8 @@ func (q Query) Match(typing bool) string {
 	var parts []string
 	for i, w := range q.Words {
 		t := quote(w)
-		if typing && i == len(q.Words)-1 && len(q.Phrases) == 0 {
+		// A one-letter prefix would match a huge number of words; wait for the second letter.
+		if typing && i == len(q.Words)-1 && len(q.Phrases) == 0 && utf8.RuneCountInString(w) >= 2 {
 			t += "*"
 		}
 		parts = append(parts, t)

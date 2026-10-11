@@ -30,3 +30,9 @@
 - [x] T8 CLI index/search/stats/remove
 - [ ] T9 evals
 - [ ] T10 file-integrity test
+
+## Status at pause (2026-10-11)
+- [x] T9 evals: corpus (26 files) + 31 queries + `cli eval`. First result: Recall@5 = 1.000, MRR@10 = 1.000; semantic cutoff 0.60 chosen.
+- In progress (committed, not yet re-evaluated/reviewed): T7 review fixes — FTS5 prefix index, rank-then-join keyword query (one hit per file), filters applied during the vector scan, relative cutoff (0.08 below best), query length caps, phrase/exact-match word fixes, eval sweeps cutoff × gap.
+- Left from the T7/T8 review: thumbnail path must pass `filepath.IsLocal` before delete (cmd/cli/engine.go removeThumbs); pass Ctrl+C ctx into startEmbedder; `-folder` / `remove` path normalization; check model files before AddRoot; trim `-kind` values.
+- Then: rerun `cli eval`, review agent for T9 + fixes, T10 file-integrity test, Phase 1 acceptance on a real Documents folder.

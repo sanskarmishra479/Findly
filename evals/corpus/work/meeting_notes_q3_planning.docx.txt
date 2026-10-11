@@ -1,0 +1,7 @@
+Q3 planning meeting - 8 July 2025
+Attendees: Anita, Ravi, Joel, Mei.
+Decisions:
+1. The customer dashboard migration moves to September because the data team is short-staffed.
+2. We will hire one more backend engineer this quarter.
+3. Weekly status updates move from Monday to Thursday.
+Action items: Anita drafts the job description; Joel updates the roadmap; Mei books the offsite for August.

@@ -68,11 +68,13 @@ CREATE TABLE vectors (
 );
 
 -- Keyword index. Contentless (stores no copy of the text) and contentless_delete=1 so
--- rows can be deleted by rowid. rowid = items.id.
+-- rows can be deleted by rowid. rowid = items.id. prefix='2 3' adds a prefix index so
+-- typing a short word prefix stays fast.
 CREATE VIRTUAL TABLE items_fts USING fts5(
   name, text,
   content='',
   contentless_delete=1,
+  prefix='2 3',
   tokenize='unicode61 remove_diacritics 2'
 );
 

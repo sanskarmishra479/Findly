@@ -1,0 +1,5 @@
+INVOICE INV-2023-0917
+Date: 28 September 2023
+Bill to: Contoso Retail.
+Description: Website accessibility audit and report.
+Total due: 1,800 dollars. Payment terms: 14 days.

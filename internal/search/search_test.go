@@ -300,7 +300,7 @@ func TestNearestMatchesBruteForce(t *testing.T) {
 	}
 	b, q, _ := vecfmt.Encode(vecFor(7, 1.0, r))
 	qv := embed.Vector{Bin: b, Q: q}
-	got := c.Nearest(&qv, Candidates)
+	got := c.Nearest(&qv, Candidates, store.Filter{})
 	if len(got) != Candidates {
 		t.Fatalf("got %d", len(got))
 	}
@@ -343,7 +343,7 @@ func BenchmarkNearest100k(b *testing.B) {
 	qv := embed.Vector{Bin: bin, Q: q}
 	b.ResetTimer()
 	for b.Loop() {
-		c.Nearest(&qv, Candidates)
+		c.Nearest(&qv, Candidates, store.Filter{})
 	}
 }
 

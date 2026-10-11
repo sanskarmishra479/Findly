@@ -1,0 +1,6 @@
+Home network setup notes
+Router: TP-Link Archer AX55, installed in the hallway cupboard.
+To change settings open 192.168.0.1 in a browser and log in with the admin account.
+The 5 GHz network is called MapleHome-5G and the guest network is MapleGuest.
+If the internet drops, unplug the router for 30 seconds, then check that the WAN light turns blue.
+The fibre modem from the provider must stay in bridge mode.

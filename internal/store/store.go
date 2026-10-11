@@ -752,31 +752,48 @@ type KeywordHit struct {
 }
 
 // KeywordSearch runs an FTS5 MATCH expression (built by the search package, never raw
-// user input) and returns up to limit hits, best first.
-func (s *Store) KeywordSearch(ctx context.Context, match string, fl Filter, limit int) ([]KeywordHit, error) {
+// user input) and returns the best hit of each matching file, best files first, up to
+// maxFiles files.
+//
+// Ranking happens inside the FTS index first (a subquery with LIMIT), and only those
+// rows are joined to items/files: joining every match before ranking took ~270 ms for a
+// common word in 50k passages. The candidate limit is larger with filters, because many
+// candidates may be filtered out.
+func (s *Store) KeywordSearch(ctx context.Context, match string, fl Filter, maxFiles int) ([]KeywordHit, error) {
 	where, args := fl.sql()
+	candidates := 500
+	if where != "1" {
+		candidates = 5000
+	}
 	q := `
-		SELECT i.id, i.file_id, i.kind, coalesce(i.locator, ''), coalesce(i.text, ''), bm25(items_fts, 2.0, 1.0)
-		FROM items_fts
-		JOIN items i ON i.id = items_fts.rowid
+		SELECT i.id, i.file_id, i.kind, coalesce(i.locator, ''), coalesce(i.text, ''), k.r
+		FROM (SELECT rowid AS id, bm25(items_fts, 2.0, 1.0) AS r
+		      FROM items_fts WHERE items_fts MATCH ? ORDER BY r LIMIT ?) k
+		JOIN items i ON i.id = k.id
 		JOIN files f ON f.id = i.file_id
-		WHERE items_fts MATCH ? AND ` + where + `
-		ORDER BY bm25(items_fts, 2.0, 1.0)
-		LIMIT ?`
-	all := append([]any{match}, args...)
-	all = append(all, limit)
+		WHERE ` + where + `
+		ORDER BY k.r`
+	all := append([]any{match, candidates}, args...)
 	rows, err := s.db.QueryContext(ctx, q, all...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []KeywordHit
+	seen := map[int64]bool{}
 	for rows.Next() {
 		var h KeywordHit
 		if err := rows.Scan(&h.ItemID, &h.FileID, &h.Kind, &h.Locator, &h.Text, &h.Rank); err != nil {
 			return nil, err
 		}
+		if seen[h.FileID] {
+			continue // one hit per file, so one big file cannot crowd out the others
+		}
+		seen[h.FileID] = true
 		out = append(out, h)
+		if len(out) == maxFiles {
+			break
+		}
 	}
 	return out, rows.Err()
 }
@@ -784,15 +801,15 @@ func (s *Store) KeywordSearch(ctx context.Context, match string, fl Filter, limi
 // VectorRow is one stored vector with its item and file.
 type VectorRow struct {
 	ItemID int64
-	FileID int64
+	File   File // ID, Path, Kind and MTime are filled (for filtering in memory)
 	Vector Vector
 }
 
 // AllVectors streams every stored vector to fn (for the in-memory search cache).
 func (s *Store) AllVectors(ctx context.Context, fn func(VectorRow) error) error {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT v.item_id, i.file_id, v.bin, v.i8, v.scale
-		FROM vectors v JOIN items i ON i.id = v.item_id
+		SELECT v.item_id, i.file_id, f.path, f.kind, f.mtime, v.bin, v.i8, v.scale
+		FROM vectors v JOIN items i ON i.id = v.item_id JOIN files f ON f.id = i.file_id
 		ORDER BY v.item_id`)
 	if err != nil {
 		return err
@@ -802,7 +819,7 @@ func (s *Store) AllVectors(ctx context.Context, fn func(VectorRow) error) error 
 	for rows.Next() {
 		var r VectorRow
 		var scale float64
-		if err := rows.Scan(&r.ItemID, &r.FileID, &bin, &i8, &scale); err != nil {
+		if err := rows.Scan(&r.ItemID, &r.File.ID, &r.File.Path, &r.File.Kind, &r.File.MTime, &bin, &i8, &scale); err != nil {
 			return err
 		}
 		if len(bin) != VectorDim/8 || len(i8) != VectorDim {
@@ -903,4 +920,9 @@ func (s *Store) Count(ctx context.Context) (Counts, error) {
 		rows.Close()
 	}
 	return c, nil
+}
+
+// Empty reports whether the filter lets everything through.
+func (fl Filter) Empty() bool {
+	return len(fl.Kinds) == 0 && fl.Folder == "" && fl.After == 0 && fl.Before == 0
 }

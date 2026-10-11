@@ -1,0 +1,50 @@
+{
+  "backend": "vulkan",
+  "date": "2026-10-11T18:23:45+05:30",
+  "files": 26,
+  "levels": [
+    {
+      "cutoff": 0.25,
+      "recall_at_5": 1,
+      "mrr_at_10": 1,
+      "avg_results": 24.258064516129032,
+      "avg_unrelated": 23.258064516129032
+    },
+    {
+      "cutoff": 0.3,
+      "recall_at_5": 1,
+      "mrr_at_10": 1,
+      "avg_results": 24.258064516129032,
+      "avg_unrelated": 23.258064516129032
+    },
+    {
+      "cutoff": 0.35,
+      "recall_at_5": 1,
+      "mrr_at_10": 1,
+      "avg_results": 24.258064516129032,
+      "avg_unrelated": 23.258064516129032
+    },
+    {
+      "cutoff": 0.4,
+      "recall_at_5": 1,
+      "mrr_at_10": 1,
+      "avg_results": 24.225806451612904,
+      "avg_unrelated": 23.225806451612904
+    },
+    {
+      "cutoff": 0.45,
+      "recall_at_5": 1,
+      "mrr_at_10": 1,
+      "avg_results": 24.032258064516128,
+      "avg_unrelated": 23.032258064516128
+    },
+    {
+      "cutoff": 0.5,
+      "recall_at_5": 1,
+      "mrr_at_10": 1,
+      "avg_results": 21.161290322580644,
+      "avg_unrelated": 20.161290322580644
+    }
+  ],
+  "queries": 31
+}
