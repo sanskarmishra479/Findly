@@ -1,7 +1,8 @@
 package store
 
 // migrations are applied in order; the index of each entry + 1 is its schema version.
-// Never edit a migration that has shipped: add a new one instead.
+// Once a version has been released, never edit its migration: add a new one instead.
+// (Migration 1 was revised before any release, after the P1-T2 review.)
 var migrations = []string{
 	// 1: initial schema (plan section 8).
 	`
@@ -10,24 +11,31 @@ CREATE TABLE meta (
   value TEXT NOT NULL
 );
 
+-- path_key is the path upper-cased in Go (all letters, not just ASCII), used for
+-- uniqueness and lookups because Windows paths are case-insensitive.
 CREATE TABLE roots (
-  id        INTEGER PRIMARY KEY,
-  path      TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  path      TEXT NOT NULL,
+  path_key  TEXT NOT NULL UNIQUE,
   enabled   INTEGER NOT NULL DEFAULT 1,
   added_at  INTEGER NOT NULL
 );
 
 CREATE TABLE excludes (
-  id       INTEGER PRIMARY KEY,
-  root_id  INTEGER NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
-  path     TEXT NOT NULL COLLATE NOCASE,
-  UNIQUE (root_id, path)
+  id        INTEGER PRIMARY KEY,
+  root_id   INTEGER NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
+  path      TEXT NOT NULL,
+  path_key  TEXT NOT NULL,
+  UNIQUE (root_id, path_key)
 );
 
+-- AUTOINCREMENT: ids are never reused, so a stale reference (e.g. in the in-memory
+-- vector cache) can never point at a different, newer file or item.
 CREATE TABLE files (
-  id           INTEGER PRIMARY KEY,
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
   root_id      INTEGER NOT NULL REFERENCES roots(id) ON DELETE CASCADE,
-  path         TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  path         TEXT NOT NULL,
+  path_key     TEXT NOT NULL UNIQUE,
   name         TEXT NOT NULL,
   ext          TEXT NOT NULL,
   kind         TEXT NOT NULL,
@@ -44,13 +52,13 @@ CREATE INDEX files_status ON files(status);
 CREATE INDEX files_hash   ON files(content_hash);
 
 CREATE TABLE items (
-  id        INTEGER PRIMARY KEY,
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
   file_id   INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
   kind      TEXT NOT NULL,
   locator   TEXT,
   text      TEXT
 );
-CREATE INDEX items_file ON items(file_id);
+CREATE INDEX items_file ON items(file_id, kind);
 
 CREATE TABLE vectors (
   item_id  INTEGER PRIMARY KEY REFERENCES items(id) ON DELETE CASCADE,

@@ -90,3 +90,12 @@ Test PC: Intel i5-12450H (8 cores / 12 threads), NVIDIA RTX 2050 (Vulkan), llama
   - Excludes are canonicalized (8.3 names, `\?\`, trailing `\`, case, `/`) and compared with `EqualFold`; drive-root excludes work.
   - `safefs` clamps FILETIME conversion (a 1601 timestamp overflowed into the future).
   - Counts only include files the callback accepted; cancellation checked every 256 entries.
+- **2026-10-11 — P1-T2 review fixes (store):**
+  - **"database is locked" bug (confirmed by reviewer, 438/480 ops failed under load):** `busy_timeout` is now the first pragma (the driver applies them in order). WAL is set once in `Open` (it is stored in the file), with a 10 s retry on BUSY. Test: 8 workers × 40 ops with a new connection per op, plus a second `Open` at the same time: 0 failures. The app must still run as a single instance (Phase 3).
+  - `DeleteFile` / `RemoveRoot` return thumbnail paths (collected in the same transaction) so the caller can delete the image files (P-5).
+  - `UpsertFile` always refreshes root, path/name casing, ext and kind; a renamed file gets a new file-name search row.
+  - `AddRoot` refuses nested roots (`ErrNestedRoot`): every file belongs to exactly one root.
+  - Free tier counts files that **have content items**, so a modified file keeps its slot while waiting; `SetFileResult(failed|skipped)` removes stale content.
+  - `AUTOINCREMENT` on roots/files/items: ids are never reused (protects the future in-memory vector cache). Migration 1 edited in place because it has never shipped.
+  - Paths are matched by a `path_key` column (Go `strings.ToUpper`), since SQLite `NOCASE` only folds ASCII (`Ärger.txt` vs `ärger.txt`).
+  - `Open` refuses UNC and `\?\` paths with a clear error (the index always lives under `%LOCALAPPDATA%`).

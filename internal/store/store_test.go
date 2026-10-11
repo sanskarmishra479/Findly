@@ -2,8 +2,11 @@ package store
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 )
 
@@ -220,9 +223,12 @@ func TestDeleteFileRemovesEverything(t *testing.T) {
 	s.ReplaceContent(ctx, keep, []Item{{Kind: ItemPassage, Text: "shopping list", Vector: vec(2)}})
 	s.db.Exec(`INSERT INTO thumbs(file_id, path) VALUES(?, 'ab/1.jpg')`, id)
 
-	ok, err := s.DeleteFile(ctx, `C:\Docs\diary.txt`)
+	ok, thumbs, err := s.DeleteFile(ctx, `C:\Docs\diary.txt`)
 	if err != nil || !ok {
 		t.Fatalf("DeleteFile = %v, %v", ok, err)
+	}
+	if len(thumbs) != 1 || thumbs[0] != "ab/1.jpg" {
+		t.Errorf("thumbs = %v, want [ab/1.jpg]", thumbs)
 	}
 	if matches(t, s, "secret") != 0 || matches(t, s, "diary") != 0 {
 		t.Error("deleted file is still searchable")
@@ -242,7 +248,7 @@ func TestDeleteFileRemovesEverything(t *testing.T) {
 	if matches(t, s, "shopping") != 1 {
 		t.Error("other file's text was removed")
 	}
-	if ok, _ := s.DeleteFile(ctx, `C:\Docs\diary.txt`); ok {
+	if ok, _, _ := s.DeleteFile(ctx, `C:\Docs\diary.txt`); ok {
 		t.Error("second delete reported success")
 	}
 }
@@ -259,7 +265,7 @@ func TestRemoveRootCascades(t *testing.T) {
 	s.ReplaceContent(ctx, b, []Item{{Kind: ItemImage, Text: "sunset", Vector: vec(2)}})
 	s.AddExclude(ctx, docs.ID, `C:\Docs\old`)
 
-	if err := s.RemoveRoot(ctx, docs.ID); err != nil {
+	if _, err := s.RemoveRoot(ctx, docs.ID); err != nil {
 		t.Fatal(err)
 	}
 	if matches(t, s, "tax") != 0 {
@@ -300,13 +306,30 @@ func TestCountContentIndexed(t *testing.T) {
 	s := openTest(t)
 	ctx := context.Background()
 	root, _ := s.AddRoot(ctx, `C:\Docs`)
-	for i, st := range []string{StatusDone, StatusPartial, StatusPending, StatusFailed, StatusSkipped, StatusDone} {
-		id := addFile(t, s, root.ID, filepath.Join(`C:\Docs`, string(rune('a'+i))+".txt"))
-		s.SetFileResult(ctx, id, st, "", "", "")
+	var ids []int64
+	for i := range 4 {
+		ids = append(ids, addFile(t, s, root.ID, filepath.Join(`C:\Docs`, string(rune('a'+i))+".txt")))
 	}
-	n, err := s.CountContentIndexed(ctx)
-	if err != nil || n != 3 {
+	// Three files get content; the fourth only has its name.
+	for _, id := range ids[:3] {
+		s.ReplaceContent(ctx, id, []Item{{Kind: ItemPassage, Text: "hello"}, {Kind: ItemPassage, Text: "more"}})
+		s.SetFileResult(ctx, id, StatusDone, "", "", "")
+	}
+	if n, err := s.CountContentIndexed(ctx); err != nil || n != 3 {
 		t.Fatalf("CountContentIndexed = %d, %v; want 3", n, err)
+	}
+
+	// Review finding 4: a modified file waiting for re-index still uses its slot…
+	f, _, _ := s.FileByPath(ctx, `C:\Docs\a.txt`)
+	f.MTime++
+	s.UpsertFile(ctx, f)
+	if n, _ := s.CountContentIndexed(ctx); n != 3 {
+		t.Errorf("after modify: %d, want 3", n)
+	}
+	// …and if re-indexing fails, its stale content is removed and the slot is freed.
+	s.SetFileResult(ctx, ids[0], StatusFailed, "", "", "read error")
+	if n, _ := s.CountContentIndexed(ctx); n != 2 {
+		t.Errorf("after failure: %d, want 2", n)
 	}
 }
 
@@ -345,5 +368,166 @@ func TestOpenPathWithSpecialCharacters(t *testing.T) {
 	s.Close()
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("database not created at the exact path: %v", err)
+	}
+}
+
+// Review finding 1: many connections opening at once must not fail with "database is locked".
+func TestConcurrentConnections(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.db.SetMaxIdleConns(0) // force a brand-new connection for every operation
+	ctx := context.Background()
+	root, _ := s.AddRoot(ctx, `C:\Docs`)
+
+	errs := make(chan error, 8*40)
+	var wg sync.WaitGroup
+	for w := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range 40 {
+				p := filepath.Join(`C:\Docs`, strconv.Itoa(w), strconv.Itoa(i)+".txt")
+				id, _, err := s.UpsertFile(ctx, File{RootID: root.ID, Path: p, Name: filepath.Base(p), Ext: ".txt", Kind: "text", Size: 1, MTime: 1})
+				if err == nil {
+					err = s.ReplaceContent(ctx, id, []Item{{Kind: ItemPassage, Text: "word"}})
+				}
+				if err == nil {
+					_, _, err = s.FileByPath(ctx, p)
+				}
+				errs <- err
+			}
+		}()
+	}
+	// A second Store on the same file at the same time (like a second app process).
+	other, err := Open(path)
+	if err != nil {
+		t.Errorf("second Open: %v", err)
+	} else {
+		other.Close()
+	}
+	wg.Wait()
+	close(errs)
+	failed := 0
+	for err := range errs {
+		if err != nil {
+			failed++
+			if failed == 1 {
+				t.Errorf("first error: %v", err)
+			}
+		}
+	}
+	if failed > 0 {
+		t.Fatalf("%d of %d operations failed", failed, 8*40)
+	}
+}
+
+// Review finding 3: moving a file to another root, or renaming it by case, updates the row.
+func TestUpsertUpdatesRootAndCaseRename(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	a, _ := s.AddRoot(ctx, `C:\A`)
+	b, _ := s.AddRoot(ctx, `D:\B`)
+	f := File{RootID: a.ID, Path: `C:\A\report.txt`, Name: "report.txt", Ext: ".txt", Kind: "text", Size: 1, MTime: 1}
+	id, _, _ := s.UpsertFile(ctx, f)
+
+	f.RootID, f.Path, f.Name = b.ID, `C:\A\REPORT.txt`, "REPORT.txt"
+	id2, _, err := s.UpsertFile(ctx, f)
+	if err != nil || id2 != id {
+		t.Fatalf("upsert: id=%d err=%v", id2, err)
+	}
+	got, _, _ := s.FileByPath(ctx, `c:\a\report.TXT`)
+	if got.RootID != b.ID || got.Path != `C:\A\REPORT.txt` || got.Name != "REPORT.txt" {
+		t.Fatalf("row not updated: %+v", got)
+	}
+	if n := count(t, s, `SELECT count(*) FROM items WHERE file_id = ? AND kind = ?`, id, ItemName); n != 1 {
+		t.Errorf("name rows = %d, want 1", n)
+	}
+	if matches(t, s, "report") != 1 {
+		t.Error("renamed file not searchable exactly once")
+	}
+}
+
+// Review finding 3: nested roots are refused, so every file has exactly one root.
+func TestAddRootRefusesNesting(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if _, err := s.AddRoot(ctx, `C:\Docs`); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{`C:\Docs\Sub`, `c:\docs\sub\deeper`, `C:\`} {
+		if _, err := s.AddRoot(ctx, p); !errors.Is(err, ErrNestedRoot) {
+			t.Errorf("AddRoot(%q) = %v, want ErrNestedRoot", p, err)
+		}
+	}
+	for _, p := range []string{`C:\Docs2`, `D:\Docs`} {
+		if _, err := s.AddRoot(ctx, p); err != nil {
+			t.Errorf("AddRoot(%q) = %v", p, err)
+		}
+	}
+}
+
+// Review finding 6: non-ASCII names are matched case-insensitively, like Windows.
+func TestNonASCIICaseInsensitive(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	root, _ := s.AddRoot(ctx, `C:\Docs`)
+	id := addFile(t, s, root.ID, `C:\Docs\Ärger.txt`)
+	s.SetFileResult(ctx, id, StatusDone, "", "", "")
+	f, ok, _ := s.FileByPath(ctx, `C:\DOCS\ärger.TXT`)
+	if !ok || f.ID != id {
+		t.Fatal("non-ASCII path lookup is case-sensitive")
+	}
+	id2, changed, _ := s.UpsertFile(ctx, File{RootID: root.ID, Path: `C:\Docs\ÄRGER.txt`, Name: "ÄRGER.txt", Ext: ".txt", Kind: "text", Size: 10, MTime: 1000})
+	if id2 != id || changed {
+		t.Errorf("case-only rename created a new row or reported a change: id=%d changed=%v", id2, changed)
+	}
+}
+
+// Review finding 5: ids are never reused, so stale references can't point at new data.
+func TestIDsNotReused(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	root, _ := s.AddRoot(ctx, `C:\Docs`)
+	id := addFile(t, s, root.ID, `C:\Docs\old.txt`)
+	s.ReplaceContent(ctx, id, []Item{{Kind: ItemPassage, Text: "alpha"}})
+	var maxItem int64
+	s.db.QueryRow(`SELECT max(id) FROM items`).Scan(&maxItem)
+	s.DeleteFile(ctx, `C:\Docs\old.txt`)
+
+	id2 := addFile(t, s, root.ID, `C:\Docs\new.txt`)
+	if id2 <= id {
+		t.Errorf("file id reused: %d after %d", id2, id)
+	}
+	var minNew int64
+	s.db.QueryRow(`SELECT min(id) FROM items`).Scan(&minNew)
+	if minNew <= maxItem {
+		t.Errorf("item id reused: %d <= %d", minNew, maxItem)
+	}
+	if matches(t, s, "alpha") != 0 {
+		t.Error("deleted text still searchable")
+	}
+}
+
+func TestRemoveRootReturnsThumbs(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	root, _ := s.AddRoot(ctx, `C:\Pics`)
+	id := addFile(t, s, root.ID, `C:\Pics\a.jpg`)
+	s.db.Exec(`INSERT INTO thumbs(file_id, path) VALUES(?, '00/1.jpg')`, id)
+	thumbs, err := s.RemoveRoot(ctx, root.ID)
+	if err != nil || len(thumbs) != 1 || thumbs[0] != "00/1.jpg" {
+		t.Fatalf("RemoveRoot = %v, %v", thumbs, err)
+	}
+}
+
+func TestOpenRefusesNetworkPaths(t *testing.T) {
+	for _, p := range []string{`\server\share\index.db`, `\?\C:\x\index.db`} {
+		if _, err := Open(p); err == nil {
+			t.Errorf("Open(%q) succeeded", p)
+		}
 	}
 }

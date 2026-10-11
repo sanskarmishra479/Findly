@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ncruces/go-sqlite3"
 	"github.com/ncruces/go-sqlite3/driver"
 	"github.com/ncruces/go-sqlite3/ext/fts5"
 )
@@ -40,22 +41,32 @@ const (
 	ItemAudio   = "audio"
 )
 
+// ErrNestedRoot is returned by AddRoot when the folder is inside, or contains, a folder
+// that is already chosen. Each file must belong to exactly one root, or removing one
+// root would delete files the other still covers.
+var ErrNestedRoot = errors.New("store: folder overlaps a folder that is already added")
+
 // Store is an open index database. It is safe for concurrent use.
 type Store struct {
 	db *sql.DB
 }
 
+// pathKey is how paths are compared: Windows ignores case for all letters (not just
+// A–Z, which is all SQLite's NOCASE handles).
+func pathKey(p string) string { return strings.ToUpper(filepath.Clean(p)) }
+
 // Open opens (or creates) the index database at path and brings its schema up to date.
-// path must be absolute; get it from appfs.FS.Path("index/index.db").
+// path must be an absolute local path; get it from appfs.FS.Path("index/index.db").
 func Open(path string) (*Store, error) {
-	if !filepath.IsAbs(path) {
-		return nil, fmt.Errorf("store: path %q must be absolute", path)
+	if !filepath.IsAbs(path) || strings.HasPrefix(path, `\\`) {
+		return nil, fmt.Errorf("store: path %q must be an absolute local path like C:\\...", path)
 	}
 	q := url.Values{}
-	q.Add("_pragma", "journal_mode(WAL)")
+	// busy_timeout must come first: the driver runs pragmas in order, and anything that
+	// needs a lock before it would fail immediately with "database is locked".
+	q.Add("_pragma", "busy_timeout(10000)")
 	q.Add("_pragma", "synchronous(NORMAL)")
 	q.Add("_pragma", "foreign_keys(ON)")
-	q.Add("_pragma", "busy_timeout(10000)")
 	q.Set("_txlock", "immediate") // take the write lock at BEGIN, avoiding deadlocks between writers
 	// "file:C:/dir/index.db?..." — characters with meaning in a URI are escaped.
 	esc := strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23").Replace(filepath.ToSlash(path))
@@ -66,11 +77,36 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{db: db}
-	if err := s.migrate(context.Background()); err != nil {
+
+	// WAL mode is stored in the database file, so it is set once here, not on every
+	// connection. Switching to WAL can return BUSY without waiting if another process
+	// has the file open, so retry for a while.
+	ctx := context.Background()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		err = s.setup(ctx)
+		if err == nil || !isBusy(err) || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if err != nil {
 		db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+func (s *Store) setup(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `PRAGMA journal_mode = WAL`); err != nil {
+		return err
+	}
+	return s.migrate(ctx)
+}
+
+func isBusy(err error) bool {
+	return errors.Is(err, sqlite3.BUSY) || errors.Is(err, sqlite3.LOCKED) ||
+		strings.Contains(err.Error(), "database is locked")
 }
 
 // Close closes the database.
@@ -131,25 +167,63 @@ type Root struct {
 }
 
 // AddRoot adds a folder (or returns the existing one with the same path).
-// Pass the real path from safefs.Canonical.
+// Pass the real path from safefs.Canonical. Folders inside or around an existing root
+// are refused with ErrNestedRoot.
 func (s *Store) AddRoot(ctx context.Context, path string) (Root, error) {
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO roots(path, added_at) VALUES(?, ?) ON CONFLICT(path) DO NOTHING`,
-		path, time.Now().UnixNano())
+	path = filepath.Clean(path)
+	key := pathKey(path)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Root{}, err
 	}
-	var r Root
-	var added int64
-	err = s.db.QueryRowContext(ctx, `SELECT id, path, enabled, added_at FROM roots WHERE path = ?`, path).
-		Scan(&r.ID, &r.Path, &r.Enabled, &added)
-	r.AddedAt = time.Unix(0, added)
-	return r, err
+	defer tx.Rollback()
+
+	roots, err := queryRoots(ctx, tx)
+	if err != nil {
+		return Root{}, err
+	}
+	for _, r := range roots {
+		rk := pathKey(r.Path)
+		if rk == key {
+			return r, nil
+		}
+		if isUnder(key, rk) || isUnder(rk, key) {
+			return Root{}, fmt.Errorf("%w: %s and %s", ErrNestedRoot, path, r.Path)
+		}
+	}
+	now := time.Now()
+	res, err := tx.ExecContext(ctx, `INSERT INTO roots(path, path_key, added_at) VALUES(?, ?, ?)`,
+		path, key, now.UnixNano())
+	if err != nil {
+		return Root{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Root{}, err
+	}
+	return Root{ID: id, Path: path, Enabled: true, AddedAt: time.Unix(0, now.UnixNano())}, tx.Commit()
+}
+
+// isUnder reports whether key is strictly inside dir (both already pathKey'd).
+func isUnder(key, dir string) bool {
+	if !strings.HasSuffix(dir, `\`) {
+		dir += `\`
+	}
+	return len(key) > len(dir) && strings.HasPrefix(key, dir)
 }
 
 // Roots lists all chosen folders.
 func (s *Store) Roots(ctx context.Context) ([]Root, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, path, enabled, added_at FROM roots ORDER BY id`)
+	return queryRoots(ctx, s.db)
+}
+
+// querier is satisfied by both *sql.DB and *sql.Tx.
+type querier interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func queryRoots(ctx context.Context, q querier) ([]Root, error) {
+	rows, err := q.QueryContext(ctx, `SELECT id, path, enabled, added_at FROM roots ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -167,24 +241,27 @@ func (s *Store) Roots(ctx context.Context) ([]Root, error) {
 	return out, rows.Err()
 }
 
-// RemoveRoot removes a folder and everything indexed from it: files, text, vectors,
-// keyword rows and thumbnail records (plan P-5). Thumbnail image files on disk must be
-// deleted by the caller.
-func (s *Store) RemoveRoot(ctx context.Context, id int64) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM roots WHERE id = ?`, id)
-	return err
+// RemoveRoot removes a folder and everything indexed from it: files, text, vectors and
+// keyword rows (plan P-5). It returns the thumbnail paths (relative to the app's thumbs
+// folder) that the caller must now delete from disk.
+func (s *Store) RemoveRoot(ctx context.Context, id int64) (thumbs []string, err error) {
+	return s.deleteWithThumbs(ctx,
+		`SELECT t.path FROM thumbs t JOIN files f ON f.id = t.file_id WHERE f.root_id = ?`,
+		`DELETE FROM roots WHERE id = ?`, id)
 }
 
 // AddExclude records a subfolder the user unticked.
 func (s *Store) AddExclude(ctx context.Context, rootID int64, path string) error {
+	path = filepath.Clean(path)
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO excludes(root_id, path) VALUES(?, ?) ON CONFLICT DO NOTHING`, rootID, path)
+		`INSERT INTO excludes(root_id, path, path_key) VALUES(?, ?, ?) ON CONFLICT DO NOTHING`,
+		rootID, path, pathKey(path))
 	return err
 }
 
 // Excludes lists unticked subfolders of a root.
 func (s *Store) Excludes(ctx context.Context, rootID int64) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT path FROM excludes WHERE root_id = ? ORDER BY path`, rootID)
+	rows, err := s.db.QueryContext(ctx, `SELECT path FROM excludes WHERE root_id = ? ORDER BY path_key`, rootID)
 	if err != nil {
 		return nil, err
 	}
@@ -221,8 +298,11 @@ type File struct {
 
 // UpsertFile records a file found by the scanner. A new file, or one whose size or
 // modification time changed, gets status pending; changed reports that it needs
-// (re)indexing. Every file also gets a file-name keyword row, so name search always works.
+// (re)indexing. Its old content stays searchable until ReplaceContent swaps it.
+// Every file has a file-name keyword row, kept in sync with the current name.
 func (s *Store) UpsertFile(ctx context.Context, f File) (id int64, changed bool, err error) {
+	f.Path = filepath.Clean(f.Path)
+	key := pathKey(f.Path)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, false, err
@@ -230,13 +310,13 @@ func (s *Store) UpsertFile(ctx context.Context, f File) (id int64, changed bool,
 	defer tx.Rollback()
 
 	var old File
-	err = tx.QueryRowContext(ctx, `SELECT id, size, mtime, status, name FROM files WHERE path = ?`, f.Path).
+	err = tx.QueryRowContext(ctx, `SELECT id, size, mtime, status, name FROM files WHERE path_key = ?`, key).
 		Scan(&old.ID, &old.Size, &old.MTime, &old.Status, &old.Name)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		res, err := tx.ExecContext(ctx,
-			`INSERT INTO files(root_id, path, name, ext, kind, size, mtime, status) VALUES(?,?,?,?,?,?,?,?)`,
-			f.RootID, f.Path, f.Name, f.Ext, f.Kind, f.Size, f.MTime, StatusPending)
+			`INSERT INTO files(root_id, path, path_key, name, ext, kind, size, mtime, status) VALUES(?,?,?,?,?,?,?,?,?)`,
+			f.RootID, f.Path, key, f.Name, f.Ext, f.Kind, f.Size, f.MTime, StatusPending)
 		if err != nil {
 			return 0, false, err
 		}
@@ -253,11 +333,26 @@ func (s *Store) UpsertFile(ctx context.Context, f File) (id int64, changed bool,
 
 	id = old.ID
 	changed = old.Size != f.Size || old.MTime != f.MTime || old.Status == StatusPending
+	status := old.Status
 	if changed {
-		_, err = tx.ExecContext(ctx,
-			`UPDATE files SET size = ?, mtime = ?, status = ?, error = NULL WHERE id = ?`,
-			f.Size, f.MTime, StatusPending, id)
-		if err != nil {
+		status = StatusPending
+	}
+	// Always refresh what the scanner knows: root (folders can be re-added), and the
+	// exact path/name casing after a case-only rename.
+	_, err = tx.ExecContext(ctx, `
+		UPDATE files SET root_id = ?, path = ?, name = ?, ext = ?, kind = ?, size = ?, mtime = ?,
+		                 status = ?, error = CASE WHEN ? THEN NULL ELSE error END
+		WHERE id = ?`,
+		f.RootID, f.Path, f.Name, f.Ext, f.Kind, f.Size, f.MTime, status, changed, id)
+	if err != nil {
+		return 0, false, err
+	}
+	if old.Name != f.Name {
+		// Replace the file-name row; the trigger removes the old keyword row.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM items WHERE file_id = ? AND kind = ?`, id, ItemName); err != nil {
+			return 0, false, err
+		}
+		if err := insertNameItem(ctx, tx, id, f.Name); err != nil {
 			return 0, false, err
 		}
 	}
@@ -283,13 +378,13 @@ func nameForSearch(name string) string {
 	return strings.NewReplacer("_", " ", "-", " ", ".", " ").Replace(name)
 }
 
-// FileByPath returns the file at path. ok is false if it is not in the index.
+// FileByPath returns the file at path (case-insensitive). ok is false if it is not indexed.
 func (s *Store) FileByPath(ctx context.Context, path string) (f File, ok bool, err error) {
 	var hash, quality, errMsg sql.NullString
 	var indexed sql.NullInt64
 	err = s.db.QueryRowContext(ctx, `
 		SELECT id, root_id, path, name, ext, kind, size, mtime, content_hash, status, quality, error, indexed_at
-		FROM files WHERE path = ?`, path).
+		FROM files WHERE path_key = ?`, pathKey(path)).
 		Scan(&f.ID, &f.RootID, &f.Path, &f.Name, &f.Ext, &f.Kind, &f.Size, &f.MTime,
 			&hash, &f.Status, &quality, &errMsg, &indexed)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -302,32 +397,85 @@ func (s *Store) FileByPath(ctx context.Context, path string) (f File, ok bool, e
 	return f, true, nil
 }
 
-// SetFileResult records the outcome of indexing a file.
+// SetFileResult records the outcome of indexing a file. A failed or skipped file loses
+// any older content, so out-of-date text of a changed file never stays searchable.
 func (s *Store) SetFileResult(ctx context.Context, id int64, status, quality, contentHash, errMsg string) error {
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if status == StatusFailed || status == StatusSkipped {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM items WHERE file_id = ? AND kind <> ?`, id, ItemName); err != nil {
+			return err
+		}
+	}
+	_, err = tx.ExecContext(ctx, `
 		UPDATE files SET status = ?, quality = NULLIF(?, ''), content_hash = NULLIF(?, ''),
 		                 error = NULLIF(?, ''), indexed_at = ?
 		WHERE id = ?`, status, quality, contentHash, errMsg, time.Now().UnixNano(), id)
-	return err
-}
-
-// DeleteFile removes a file and everything indexed from it (plan P-5).
-// It returns false if the file was not in the index.
-func (s *Store) DeleteFile(ctx context.Context, path string) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM files WHERE path = ?`, path)
 	if err != nil {
-		return false, err
+		return err
 	}
-	n, err := res.RowsAffected()
-	return n > 0, err
+	return tx.Commit()
 }
 
-// CountContentIndexed counts files whose content is (at least partly) indexed.
-// This is the number the free-tier limit of 300 files is checked against.
+// DeleteFile removes a file and everything indexed from it (plan P-5). It returns the
+// thumbnail paths the caller must delete from disk; found is false if the file was not
+// in the index.
+func (s *Store) DeleteFile(ctx context.Context, path string) (found bool, thumbs []string, err error) {
+	key := pathKey(path)
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM files WHERE path_key = ?`, key).Scan(&n); err != nil {
+		return false, nil, err
+	}
+	if n == 0 {
+		return false, nil, nil
+	}
+	thumbs, err = s.deleteWithThumbs(ctx,
+		`SELECT t.path FROM thumbs t JOIN files f ON f.id = t.file_id WHERE f.path_key = ?`,
+		`DELETE FROM files WHERE path_key = ?`, key)
+	return err == nil, thumbs, err
+}
+
+// deleteWithThumbs collects thumbnail paths and runs the delete in one transaction, so
+// no thumbnail can be added in between and then forgotten.
+func (s *Store) deleteWithThumbs(ctx context.Context, selectThumbs, del string, arg any) ([]string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, selectThumbs, arg)
+	if err != nil {
+		return nil, err
+	}
+	var thumbs []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		thumbs = append(thumbs, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, del, arg); err != nil {
+		return nil, err
+	}
+	return thumbs, tx.Commit()
+}
+
+// CountContentIndexed counts files that have content in the index (text, images…), not
+// just a file name. This is the number the free-tier limit of 300 files is checked
+// against; a modified file keeps counting while it waits to be re-indexed.
 func (s *Store) CountContentIndexed(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM files WHERE status IN (?, ?)`, StatusDone, StatusPartial).Scan(&n)
+		`SELECT count(DISTINCT file_id) FROM items WHERE kind <> ?`, ItemName).Scan(&n)
 	return n, err
 }
 
@@ -353,6 +501,11 @@ type Item struct {
 // ReplaceContent replaces all content items of a file (keeping its file-name row) in one
 // transaction, so search never sees a half-updated file.
 func (s *Store) ReplaceContent(ctx context.Context, fileID int64, items []Item) error {
+	for _, it := range items {
+		if it.Kind == ItemName || it.Kind == "" {
+			return fmt.Errorf("store: invalid item kind %q", it.Kind)
+		}
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -381,9 +534,6 @@ func (s *Store) ReplaceContent(ctx context.Context, fileID int64, items []Item) 
 	defer insVec.Close()
 
 	for _, it := range items {
-		if it.Kind == ItemName || it.Kind == "" {
-			return fmt.Errorf("store: invalid item kind %q", it.Kind)
-		}
 		res, err := insItem.ExecContext(ctx, fileID, it.Kind, it.Locator, it.Text)
 		if err != nil {
 			return err
