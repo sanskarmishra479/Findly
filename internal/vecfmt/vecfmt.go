@@ -78,6 +78,9 @@ func ToInt8(v []float32) Int8 {
 		return q
 	}
 	q.Scale = maxAbs / 127
+	if q.Scale == 0 || math.IsInf(float64(q.Scale), 0) || math.IsNaN(float64(q.Scale)) {
+		return Int8{} // values too small (or broken) to quantize: treat as an empty vector
+	}
 	for i := 0; i < Dim && i < len(v); i++ {
 		q.I8[i] = int8(math.Round(float64(v[i] / q.Scale)))
 	}

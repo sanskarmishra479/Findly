@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -62,6 +63,9 @@ func Start(exe string, args []string, opts Options) (*Proc, error) {
 		flags |= windows.BELOW_NORMAL_PRIORITY_CLASS
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: flags}
+	// If a grandchild keeps the output pipe open after the child exits, stop waiting for
+	// it after this delay instead of blocking Wait (and Stop) indefinitely.
+	cmd.WaitDelay = 2 * time.Second
 
 	if err := cmd.Start(); err != nil {
 		windows.CloseHandle(job)
@@ -101,6 +105,8 @@ func (p *Proc) Pid() int { return p.cmd.Process.Pid }
 // Stop kills the process and waits for it to exit. Safe to call more than once.
 func (p *Proc) Stop() {
 	p.stopOnce.Do(func() {
+		// Terminating the job kills the child and anything it started.
+		windows.TerminateJobObject(p.job, 1)
 		p.cmd.Process.Kill()
 		<-p.done
 		windows.CloseHandle(p.job)
@@ -147,6 +153,12 @@ type Tail struct {
 func (t *Tail) Write(p []byte) (int, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if len(p) >= t.Size {
+		// Keep only the end, in a fresh buffer, so one huge write does not keep a huge
+		// backing array alive.
+		t.buf = append(make([]byte, 0, t.Size), p[len(p)-t.Size:]...)
+		return len(p), nil
+	}
 	t.buf = append(t.buf, p...)
 	if over := len(t.buf) - t.Size; over > 0 {
 		t.buf = append(t.buf[:0], t.buf[over:]...)
@@ -162,3 +174,7 @@ func (t *Tail) String() string {
 
 // ErrExited is returned when an operation needs a process that has exited.
 var ErrExited = errors.New("sidecar: process exited")
+
+// Note: a child could start its own children before AssignProcessToJobObject runs; those
+// would escape the job. llama-server starts none. If a future helper does, start it
+// suspended and assign it before resuming.

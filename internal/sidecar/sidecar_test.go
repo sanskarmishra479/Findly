@@ -127,3 +127,27 @@ func TestJobKillsChildWhenParentDies(t *testing.T) {
 	exec.Command("taskkill", "/F", "/PID", pid).Run()
 	t.Fatal("child outlived its parent")
 }
+
+// Review: a grandchild holding the output pipe must not make Stop or Exited hang.
+func TestStopWithGrandchildHoldingPipe(t *testing.T) {
+	var out Tail
+	out.Size = 1024
+	p, err := Start(cmdExe(t), []string{"/c", "start /b ping -n 20 127.0.0.1"}, Options{Output: &out})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	p.Stop()
+	if d := time.Since(start); d > 4*time.Second {
+		t.Fatalf("Stop took %v", d)
+	}
+}
+
+func TestTailHugeWrite(t *testing.T) {
+	tail := Tail{Size: 10}
+	tail.Write(make([]byte, 1<<20))
+	tail.Write([]byte("end"))
+	if cap(tail.buf) > 1024 || !strings.HasSuffix(tail.String(), "end") || len(tail.String()) != 10 {
+		t.Fatalf("cap=%d s=%q", cap(tail.buf), tail.String())
+	}
+}

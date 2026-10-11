@@ -125,3 +125,30 @@ func TestLargeInputIsFast(t *testing.T) {
 		t.Fatalf("took %v for %d chunks", d, len(got))
 	}
 }
+
+// Review: tiny units and punctuation used to produce passages up to 4,198 characters,
+// because the separators between units were not counted.
+func TestMaxIsEnforcedInBytes(t *testing.T) {
+	inputs := map[string]string{
+		"tiny paragraphs": strings.Repeat("x\n\n", 5000),
+		"exclamations":    strings.Repeat("! ", 5000),
+		"initials":        strings.Repeat("A. ", 5000),
+		"emoji":           strings.Repeat("😀", 5000),
+		"rare script":     strings.Repeat("ꙮ𐍈ᚠ ", 3000),
+		"cjk":             strings.Repeat("租约规定不允许养宠物。", 500),
+	}
+	for name, in := range inputs {
+		got := Split([]Section{{Text: in}})
+		if len(got) == 0 {
+			t.Errorf("%s: no chunks", name)
+		}
+		for i, c := range got {
+			if len(c.Text) > Max {
+				t.Errorf("%s: chunk %d is %d bytes > Max %d", name, i, len(c.Text), Max)
+			}
+			if !utf8.ValidString(c.Text) {
+				t.Errorf("%s: chunk %d is not valid UTF-8", name, i)
+			}
+		}
+	}
+}

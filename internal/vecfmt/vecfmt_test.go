@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"math/rand/v2"
+	"slices"
 	"testing"
 )
 
@@ -160,4 +161,85 @@ func BenchmarkDot200(b *testing.B) {
 		}
 		_ = s
 	}
+}
+
+func TestToInt8TinyValues(t *testing.T) {
+	v := make([]float32, Dim)
+	v[0] = 1e-44
+	if q := ToInt8(v); q.Scale != 0 || q.I8[0] != 0 {
+		t.Fatalf("got scale=%v i8[0]=%d", q.Scale, q.I8[0])
+	}
+}
+
+// Search keeps the top 200 by Hamming distance, then re-ranks with int8. That only works
+// if the true top-10 (by real cosine) are almost always inside that top 200.
+func TestBinaryPrefilterRecall(t *testing.T) {
+	r := rand.New(rand.NewPCG(11, 12))
+	const nDocs, nClusters, nQueries = 20000, 200, 50
+	centers := make([][]float32, nClusters)
+	for i := range centers {
+		centers[i] = randVec(r, Dim)
+	}
+	noisy := func(c []float32, noise float32) []float32 {
+		v := make([]float32, Dim)
+		for i := range v {
+			v[i] = c[i] + noise*float32(r.NormFloat64())
+		}
+		out, _ := Truncate(v)
+		return out
+	}
+	docs := make([][]float32, nDocs)
+	bins := make([]Bin, nDocs)
+	for i := range docs {
+		docs[i] = noisy(centers[i%nClusters], 0.8)
+		bins[i] = ToBinary(docs[i])
+	}
+	var hits, total int
+	for qi := range nQueries {
+		q := noisy(centers[qi*3%nClusters], 0.8)
+		qb := ToBinary(q)
+		// True top 10 by cosine.
+		type scored struct {
+			i int
+			s float64
+		}
+		all := make([]scored, nDocs)
+		for i := range docs {
+			all[i] = scored{i, cosine(q, docs[i])}
+		}
+		sortDesc(all, func(a, b scored) bool { return a.s > b.s })
+		// Top 200 by Hamming.
+		byHam := make([]scored, nDocs)
+		for i := range bins {
+			byHam[i] = scored{i, -float64(Hamming(&qb, &bins[i]))}
+		}
+		sortDesc(byHam, func(a, b scored) bool { return a.s > b.s })
+		in200 := map[int]bool{}
+		for _, s := range byHam[:200] {
+			in200[s.i] = true
+		}
+		for _, s := range all[:10] {
+			total++
+			if in200[s.i] {
+				hits++
+			}
+		}
+	}
+	recall := float64(hits) / float64(total)
+	t.Logf("binary top-200 recall@10 = %.3f", recall)
+	if recall < 0.9 {
+		t.Fatalf("recall %.3f < 0.9", recall)
+	}
+}
+
+func sortDesc[T any](s []T, less func(a, b T) bool) {
+	slices.SortFunc(s, func(a, b T) int {
+		if less(a, b) {
+			return -1
+		}
+		if less(b, a) {
+			return 1
+		}
+		return 0
+	})
 }

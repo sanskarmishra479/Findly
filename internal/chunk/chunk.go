@@ -9,12 +9,14 @@ import (
 	"unicode/utf8"
 )
 
-// Sizes in characters (runes). EmbeddingGemma averages ~4 characters per token for
-// English; CJK text is denser, so for it these sizes give fewer tokens, which is safe.
+// Sizes in UTF-8 bytes. Measured with the real tokenizer, 1,400 *characters* were 321
+// tokens of English but 940 of Chinese, 1,407 of emoji and 4,669 of rare scripts, which
+// overflowed the server batch. Bytes track tokens far better: 1,400 bytes is ~320
+// English tokens, ~310 CJK tokens and at most ~1,200 for rare scripts.
 const (
-	Target  = 1400 // ≈ 350 tokens
-	Overlap = 200  // ≈ 50 tokens
-	// Max is a hard upper bound for one passage, far below the model's 8,192-token context.
+	Target  = 1400 // ≈ 350 English tokens
+	Overlap = 200  // ≈ 50 English tokens
+	// Max is a hard upper bound for one passage, separators included.
 	Max = 2000
 )
 
@@ -51,8 +53,15 @@ func splitText(text string) []string {
 	var out []string
 	for start := 0; start < len(units); {
 		size, end := 0, start
-		for end < len(units) && (end == start || size+units[end].n <= Target) {
-			size += units[end].n
+		for end < len(units) {
+			add := units[end].n
+			if end > start {
+				add += sepLen(units[end-1]) // the space or blank line join() will insert
+			}
+			if end > start && size+add > Target {
+				break
+			}
+			size += add
 			end++
 		}
 		out = append(out, join(units[start:end]))
@@ -62,9 +71,9 @@ func splitText(text string) []string {
 		// Step back over trailing units worth at most Overlap characters, but always
 		// move forward by at least one unit so the loop ends.
 		next, back := end, 0
-		for next-1 > start && back+units[next-1].n <= Overlap {
+		for next-1 > start && back+units[next-1].n+sepLen(units[next-1]) <= Overlap {
 			next--
-			back += units[next].n
+			back += units[next].n + sepLen(units[next])
 		}
 		start = next
 	}
@@ -73,7 +82,7 @@ func splitText(text string) []string {
 
 type unit struct {
 	text string
-	n    int  // length in runes
+	n    int  // length in bytes
 	para bool // a paragraph ends after this unit
 }
 
@@ -103,7 +112,7 @@ func units(text string) []unit {
 		}
 		for _, sent := range sentences(para) {
 			for _, piece := range pieces(sent, Target) {
-				out = append(out, unit{text: piece, n: utf8.RuneCountInString(piece)})
+				out = append(out, unit{text: piece, n: len(piece)})
 			}
 		}
 		out[len(out)-1].para = true
@@ -139,23 +148,32 @@ func sentences(p string) []string {
 	return out
 }
 
-// pieces cuts s into parts of at most limit runes, at spaces when possible.
+// pieces cuts s into parts of at most limit bytes, at spaces when possible, never in the
+// middle of a character.
 func pieces(s string, limit int) []string {
-	rs := []rune(s)
 	var out []string
-	for len(rs) > limit {
+	for len(s) > limit {
 		cut := limit
-		for i := limit; i > limit/2; i-- {
-			if rs[i] == ' ' {
-				cut = i
-				break
-			}
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
 		}
-		out = append(out, strings.TrimSpace(string(rs[:cut])))
-		rs = rs[cut:]
+		if sp := strings.LastIndexByte(s[:cut], ' '); sp > limit/2 {
+			cut = sp
+		}
+		if p := strings.TrimSpace(s[:cut]); p != "" {
+			out = append(out, p)
+		}
+		s = s[cut:]
 	}
-	if s := strings.TrimSpace(string(rs)); s != "" {
-		out = append(out, s)
+	if p := strings.TrimSpace(s); p != "" {
+		out = append(out, p)
 	}
 	return out
+}
+
+func sepLen(u unit) int {
+	if u.para {
+		return 2
+	}
+	return 1
 }

@@ -6,11 +6,17 @@ import (
 	"container/list"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/sanskarmishra479/findly/internal/vecfmt"
@@ -163,7 +169,117 @@ func TestRealServer(t *testing.T) {
 	if _, err := s.EmbedQuery(ctx, "a brand new query after crash"); err != nil {
 		t.Fatalf("no restart after crash: %v", err)
 	}
-	if s.restarts != 1 {
-		t.Errorf("restarts = %d, want 1", s.restarts)
+	if s.restarts != 0 {
+		t.Errorf("restarts = %d, want 0 (reset after a successful request)", s.restarts)
+	}
+}
+
+func realConfig(t *testing.T) Config {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("short mode")
+	}
+	root, _ := filepath.Abs(filepath.Join("..", ".."))
+	cfg := Config{
+		ServerExe: filepath.Join(root, "third_party", "llama", "cpu", "llama-server.exe"),
+		Model:     filepath.Join(root, "third_party", "models", "embeddinggemma-2-Q8_0.gguf"),
+	}
+	for _, p := range []string{cfg.ServerExe, cfg.Model} {
+		if _, err := os.Stat(p); err != nil {
+			t.Skipf("model files not downloaded: %v", err)
+		}
+	}
+	return cfg
+}
+
+// Review 1 (P-4): another program listening on our port must never receive anything.
+func TestPortSquatterIsRefused(t *testing.T) {
+	cfg := realConfig(t)
+	var hits atomic.Int64
+	squatter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer squatter.Close()
+	squatPort := squatter.Listener.Addr().(*net.TCPAddr).Port
+
+	first := true
+	pickPort = func() (int, error) {
+		if first {
+			first = false
+			return squatPort, nil
+		}
+		return freePort()
+	}
+	defer func() { pickPort = freePort }()
+
+	s, err := Start(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.EmbedQuery(context.Background(), "hello"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasSuffix(s.base, ":"+strconv.Itoa(squatPort)) {
+		t.Fatal("using the squatted port")
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("squatter received %d requests", n)
+	}
+}
+
+// Review 2: a passage far over the token limit is cut and still embedded, and one bad
+// passage does not fail the rest of its batch.
+func TestTooLongPassageIsCut(t *testing.T) {
+	s, err := Start(context.Background(), realConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	huge := strings.Repeat("ꙮ𐍈ᚠ ", 3000) // ~10,000 tokens
+	vs, err := s.EmbedPassages(context.Background(), "x.txt", []string{"normal text", huge, "more normal text"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vs) != 3 {
+		t.Fatalf("got %d vectors", len(vs))
+	}
+}
+
+// Review 3: a cancelled request is reported as cancelled and does not use up restarts.
+func TestCancelledRequestKeepsServer(t *testing.T) {
+	s, err := Start(context.Background(), realConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.EmbedQuery(ctx, "cancelled query"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v, want context.Canceled", err)
+	}
+	if _, err := s.EmbedQuery(context.Background(), "next query works"); err != nil {
+		t.Fatal(err)
+	}
+	if s.restarts != 0 {
+		t.Fatalf("restarts = %d", s.restarts)
+	}
+}
+
+func TestParseResponseRejectsWrongDim(t *testing.T) {
+	body := `{"data":[{"index":0,"embedding":[` + strings.Repeat("0.5,", 1023) + `0.5]}]}`
+	if _, err := parseResponse([]byte(body), 1); err == nil {
+		t.Fatal("1024-d vector accepted")
+	}
+}
+
+func TestTokensInError(t *testing.T) {
+	msg := `embed: input cannot be embedded: {"error":{"message":"input (33009 tokens) is too large to process."}}`
+	if n := tokensInError(msg); n != 33009 {
+		t.Fatalf("got %d", n)
+	}
+	if n := tokensInError("something else"); n != 0 {
+		t.Fatalf("got %d", n)
 	}
 }
