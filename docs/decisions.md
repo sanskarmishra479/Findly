@@ -26,4 +26,9 @@ Record of what was decided and why. Newest at the bottom of each section.
    "input":[{"content":[{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,..."}}]}]}
   ```
   on `POST /v1/embeddings`. Do **not** use `/embedding` with `image_data`: it silently ignores the image and returns a text-only vector. Audio part type still to confirm (likely `input_audio`).
+- **2026-10-11 — llama-server hardening** (from `--help` of b11552). Always start with:
+  `--host 127.0.0.1 --port <random> --offline --no-mmproj-auto --no-webui`, API key via the `LLAMA_API_KEY` **env var** (not argv, so it is not visible in process listings).
+  Start the process with a **clean environment** (only `SystemRoot`, `PATH`, `LLAMA_API_KEY`): llama-server reads `LLAMA_ARG_*` and `HF_TOKEN` from env, and has experimental `--tools` (read_file, grep…) and an MCP proxy. A stray env var must never turn those on. Never pass `--tools`, `--media-path`, `-hf`, `--embd-gemma-default`.
+- **2026-10-11** `--ubatch-size` must cover the whole input for embeddings (non-causal); 2048 for the spike (30 s audio ≈ 750 tokens). Image budget flags: `--image-min-tokens` / `--image-max-tokens`.
+- **2026-10-11 — dependency policy:** stable, maintained, security-checked libraries only; prefer stdlib and `golang.org/x`. Every dependency is checked (release status, maintenance, license, `govulncheck`) and recorded here. Global hotkey: use `RegisterHotKey` via `golang.org/x/sys/windows` instead of `golang.design/x/hotkey`. Wails v3 stability to be checked before Phase 3.
 - Open: pooling flag, image token budget control (70 vs 280), whether DigUp's patch is still needed, CPU vs Vulkan vector match.
