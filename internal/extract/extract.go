@@ -40,9 +40,11 @@ type Doc struct {
 	Sections  []Section
 	Truncated bool // text was cut at MaxOutputText
 	// PDF only:
-	Pages     int   // total pages in the file
-	MorePages bool  // pages after PDFFirstPass were not extracted yet (deferred job)
-	NeedsOCR  []int // 1-based pages with almost no text: probably scanned
+	Pages       int   // total pages in the file
+	LastPage    int   // last page processed (1-based); a deferred job continues after it
+	MorePages   bool  // pages after LastPage still need extracting (deferred job)
+	NeedsOCR    []int // 1-based pages with almost no text: probably scanned
+	FailedPages []int // 1-based pages PDFium could not read
 }
 
 // Text returns all sections joined by blank lines.
@@ -72,12 +74,13 @@ func File(path string) (Doc, error) {
 	case ".rtf":
 		text, err = rtfFile(path)
 	case ".pdf":
-		doc, total, err := PDFPages(path, 0, PDFFirstPass)
+		doc, total, err := PDFPages(path, 0, PDFFirstPass, MaxOutputText)
 		if err != nil {
 			return Doc{}, err
 		}
 		doc.Pages = total
-		doc.MorePages = total > PDFFirstPass
+		// A deferred job reads the rest, with the text budget this pass did not use.
+		doc.MorePages = !doc.Truncated && doc.LastPage < min(total, MaxPDFPages)
 		return doc, nil
 	default:
 		return Doc{}, fmt.Errorf("%w: %s", ErrUnsupported, filepath.Ext(path))

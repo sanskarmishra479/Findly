@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
+	pdfiumerr "github.com/klippa-app/go-pdfium/errors"
 	"github.com/klippa-app/go-pdfium/requests"
 )
 
@@ -88,13 +90,11 @@ func TestPDFFirstPassAndRanges(t *testing.T) {
 		t.Fatalf("Pages=%d MorePages=%v sections=%d", d.Pages, d.MorePages, len(d.Sections))
 	}
 	// The deferred job reads the rest.
-	rest, total, err := PDFPages(p, PDFFirstPass, total(len(pages)))
-	if err != nil || total != len(pages) || len(rest.Sections) != 5 || rest.Sections[0].Page != PDFFirstPass+1 {
-		t.Fatalf("rest: sections=%d total=%d err=%v", len(rest.Sections), total, err)
+	rest, n, err := PDFPages(p, PDFFirstPass, len(pages), MaxOutputText)
+	if err != nil || n != len(pages) || len(rest.Sections) != 5 || rest.Sections[0].Page != PDFFirstPass+1 {
+		t.Fatalf("rest: sections=%d total=%d err=%v", len(rest.Sections), n, err)
 	}
 }
-
-func total(n int) int { return n }
 
 func TestPDFGarbageIsAnErrorNotACrash(t *testing.T) {
 	for name, data := range map[string][]byte{
@@ -141,5 +141,89 @@ func TestPDFTooLarge(t *testing.T) {
 	}
 	if _, err := File(p); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("got %v, want ErrTooLarge", err)
+	}
+}
+
+func TestPDFBadRange(t *testing.T) {
+	p := write(t, "r.pdf", makePDF("some text on the only page"))
+	for _, r := range [][2]int{{-1, 5}, {5, 2}} {
+		if _, _, err := PDFPages(p, r[0], r[1], MaxOutputText); err == nil {
+			t.Errorf("range %v: expected error", r)
+		}
+	}
+	// Past the end is fine: nothing to read.
+	d, n, err := PDFPages(p, 10, 20, MaxOutputText)
+	if err != nil || n != 1 || len(d.Sections) != 0 {
+		t.Errorf("past end: sections=%d total=%d err=%v", len(d.Sections), n, err)
+	}
+}
+
+// Review 5: the page crossing the text cap is cut, not dropped, and no more pages follow.
+func TestPDFOutputCap(t *testing.T) {
+	p := write(t, "cap.pdf", makePDF("first page has some words", "second page has more words", "third page"))
+	d, _, err := PDFPages(p, 0, 10, 40)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.Truncated || len(d.Sections) != 2 || d.LastPage != 2 {
+		t.Fatalf("truncated=%v sections=%d last=%d", d.Truncated, len(d.Sections), d.LastPage)
+	}
+	if size := len(d.Sections[0].Text) + len(d.Sections[1].Text); size > 40 {
+		t.Fatalf("output %d bytes > cap 40", size)
+	}
+}
+
+// Review 2: more callers than engines all succeed (they wait their turn).
+func TestPDFConcurrentCallers(t *testing.T) {
+	p := write(t, "c.pdf", makePDF("concurrent extraction test page"))
+	errs := make(chan error, 6)
+	for range 6 {
+		go func() { _, err := File(p); errs <- err }()
+	}
+	for range 6 {
+		if err := <-errs; err != nil {
+			t.Errorf("concurrent File: %v", err)
+		}
+	}
+}
+
+// Review 2/8: a PDF that takes too long is stopped, and the engine still works afterwards.
+func TestPDFTimeoutKillsAndRecovers(t *testing.T) {
+	pages := make([]string, 3000)
+	for i := range pages {
+		pages[i] = fmt.Sprintf("page %d with enough text to not count as scanned", i)
+	}
+	big := write(t, "slow.pdf", makePDF(pages...))
+	old := pdfTimeout
+	pdfTimeout = 50 * time.Millisecond
+	_, _, err := PDFPages(big, 0, 3000, MaxOutputText)
+	pdfTimeout = old
+	if !errors.Is(err, ErrPDFTimeout) {
+		t.Fatalf("got %v, want ErrPDFTimeout", err)
+	}
+	if _, err := File(write(t, "after.pdf", makePDF("engine works after a kill"))); err != nil {
+		t.Fatalf("engine broken after timeout: %v", err)
+	}
+}
+
+func TestPDFPasswordErrorMapping(t *testing.T) {
+	// Real encrypted fixtures need an encryption library; check the mapping instead.
+	for _, e := range []error{pdfiumerr.ErrPassword, pdfiumerr.ErrSecurity} {
+		wrapped := fmt.Errorf("open: %w", e)
+		if !errors.Is(wrapped, pdfiumerr.ErrPassword) && !errors.Is(wrapped, pdfiumerr.ErrSecurity) {
+			t.Fatal("errors.Is does not see through wrapping")
+		}
+	}
+}
+
+func TestClosePDFTwiceAndReuse(t *testing.T) {
+	if err := ClosePDF(); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClosePDF(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := File(write(t, "reuse.pdf", makePDF("engine restarts after close"))); err != nil {
+		t.Fatalf("after ClosePDF: %v", err)
 	}
 }

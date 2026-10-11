@@ -7,11 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/klippa-app/go-pdfium"
+	pdfiumerr "github.com/klippa-app/go-pdfium/errors"
 	"github.com/klippa-app/go-pdfium/requests"
 	"github.com/klippa-app/go-pdfium/webassembly"
 	"github.com/sanskarmishra479/findly/internal/safefs"
@@ -22,21 +22,36 @@ import (
 
 // PDF limits (plan 9.4).
 const (
-	MaxPDFFile      = 256 << 20 // bytes read from disk
-	PDFFirstPass    = 30        // pages extracted in the first pass; the rest are deferred
-	MaxPDFPages     = 5000      // pages ever extracted from one file
-	ScannedPageText = 20        // a page with less text than this is probably a scan (needs OCR)
-	pdfTimeout      = 2 * time.Minute
+	// MaxPDFFile keeps peak memory near 640 MB: the bytes in Go plus PDFium's 512 MiB
+	// sandbox, with one PDF engine at a time (fine on an 8 GB PC).
+	MaxPDFFile      = 128 << 20
+	PDFFirstPass    = 30   // pages extracted in the first pass; the rest are deferred
+	MaxPDFPages     = 5000 // pages ever extracted from one file
+	ScannedPageText = 20   // a page with less text than this is probably a scan (needs OCR)
 	pdfMemoryPages  = 8192 // WebAssembly memory cap: 8192 × 64 KiB = 512 MiB
+	pdfEngines      = 1    // PDF engines running at once
+	maxPageFailures = 3    // consecutive page errors that mean the engine itself is broken
 )
 
-// ErrPDFPassword is returned for password-protected PDFs, which Findly does not open.
-var ErrPDFPassword = errors.New("extract: PDF is password-protected")
+// Variables so tests can shorten them.
+var (
+	pdfTimeout = 2 * time.Minute // extraction time for one call, after an engine is free
+	pdfWait    = 5 * time.Minute // time to wait for a free engine
+)
 
 var (
-	pdfOnce sync.Once
+	// ErrPDFPassword is returned for password-protected PDFs, which Findly does not open.
+	ErrPDFPassword = errors.New("extract: PDF is password-protected or encrypted")
+	// ErrPDFBusy means no PDF engine became free in time; retry later. It says nothing
+	// about the file itself.
+	ErrPDFBusy = errors.New("extract: PDF engine busy")
+	// ErrPDFTimeout means this PDF took too long and its engine was stopped.
+	ErrPDFTimeout = errors.New("extract: PDF took too long")
+)
+
+var (
+	pdfMu   sync.Mutex
 	pdfPool pdfium.Pool
-	pdfErr  error
 )
 
 // pdfEngine starts PDFium (compiled to WebAssembly) on first use. The sandbox gets:
@@ -44,35 +59,51 @@ var (
 // a memory cap, and a runtime that stops when its context is cancelled, so a hostile
 // PDF cannot read files, spam logs, exhaust RAM or hang forever.
 func pdfEngine() (pdfium.Pool, error) {
-	pdfOnce.Do(func() {
-		pdfPool, pdfErr = webassembly.Init(webassembly.Config{
-			MinIdle:  0,
-			MaxIdle:  1,
-			MaxTotal: 2,
-			FSConfig: wazero.NewFSConfig(), // empty: nothing mounted (the default mounts the whole drive)
-			Stdout:   io.Discard,
-			Stderr:   io.Discard,
-			RuntimeConfig: wazero.NewRuntimeConfig().
-				WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling).
-				WithMemoryLimitPages(pdfMemoryPages).
-				WithCloseOnContextDone(true),
-		})
+	pdfMu.Lock()
+	defer pdfMu.Unlock()
+	if pdfPool != nil {
+		return pdfPool, nil
+	}
+	pool, err := webassembly.Init(webassembly.Config{
+		MinIdle:  0,
+		MaxIdle:  pdfEngines,
+		MaxTotal: pdfEngines,
+		FSConfig: wazero.NewFSConfig(), // empty: nothing mounted (the default mounts the whole drive)
+		Stdout:   io.Discard,
+		Stderr:   io.Discard,
+		RuntimeConfig: wazero.NewRuntimeConfig().
+			WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling).
+			WithMemoryLimitPages(pdfMemoryPages).
+			WithCloseOnContextDone(true),
 	})
-	return pdfPool, pdfErr
+	if err != nil {
+		return nil, fmt.Errorf("extract: PDF engine: %w", err)
+	}
+	pdfPool = pool
+	return pdfPool, nil
 }
 
-// ClosePDF releases the PDF engine (call on app exit).
+// ClosePDF releases the PDF engine (call on app exit). Safe to call more than once; a
+// later PDF starts a new engine.
 func ClosePDF() error {
+	pdfMu.Lock()
+	defer pdfMu.Unlock()
 	if pdfPool == nil {
 		return nil
 	}
-	return pdfPool.Close()
+	err := pdfPool.Close()
+	pdfPool = nil
+	return err
 }
 
-// PDFPages extracts the text of pages [from, to) (0-based) of the PDF at path.
-// Sections get 1-based page numbers. NeedsOCR lists 1-based pages with almost no text.
-// total is the number of pages in the file.
-func PDFPages(path string, from, to int) (doc Doc, total int, err error) {
+// PDFPages extracts the text of pages [from, to) (0-based) of the PDF at path, up to
+// maxText bytes in total. Sections get 1-based page numbers. total is the number of
+// pages in the file; doc.LastPage is the last page processed (1-based), so a deferred
+// job can continue from there.
+func PDFPages(path string, from, to, maxText int) (doc Doc, total int, err error) {
+	if from < 0 || to < from {
+		return Doc{}, 0, fmt.Errorf("extract: bad page range %d..%d", from, to)
+	}
 	info, err := safefs.Stat(path)
 	if err != nil {
 		return Doc{}, 0, err
@@ -87,13 +118,15 @@ func PDFPages(path string, from, to int) (doc Doc, total int, err error) {
 
 	pool, err := pdfEngine()
 	if err != nil {
-		return Doc{}, 0, fmt.Errorf("extract: PDF engine: %w", err)
+		return Doc{}, 0, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), pdfTimeout)
-	defer cancel()
-	inst, err := pool.GetInstanceWithContext(ctx)
+	// Waiting for a free engine has its own deadline, so a queued PDF still gets the
+	// full extraction time once it starts.
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), pdfWait)
+	inst, err := pool.GetInstanceWithContext(waitCtx)
+	cancelWait()
 	if err != nil {
-		return Doc{}, 0, fmt.Errorf("extract: PDF engine busy: %w", err)
+		return Doc{}, 0, fmt.Errorf("%w: %v", ErrPDFBusy, err)
 	}
 
 	type result struct {
@@ -101,25 +134,25 @@ func PDFPages(path string, from, to int) (doc Doc, total int, err error) {
 		total int
 		err   error
 	}
-	done := make(chan result, 1)
+	done := make(chan result, 1) // buffered: the goroutine never blocks if we time out
 	go func() {
-		d, n, err := pdfText(inst, data, from, to)
+		d, n, err := pdfText(inst, data, from, to, maxText)
 		done <- result{d, n, err}
 	}()
 	select {
 	case r := <-done:
 		inst.Close()
 		return r.doc, r.total, r.err
-	case <-ctx.Done():
-		inst.Kill() // stops the hung WebAssembly call
-		return Doc{}, 0, fmt.Errorf("extract: PDF took longer than %v: %s", pdfTimeout, path)
+	case <-time.After(pdfTimeout):
+		inst.Kill() // stops the hung WebAssembly call; the pool replaces the instance
+		return Doc{}, 0, fmt.Errorf("%w (%v): %s", ErrPDFTimeout, pdfTimeout, path)
 	}
 }
 
-func pdfText(inst pdfium.Pdfium, data []byte, from, to int) (Doc, int, error) {
+func pdfText(inst pdfium.Pdfium, data []byte, from, to, maxText int) (Doc, int, error) {
 	opened, err := inst.OpenDocument(&requests.OpenDocument{File: &data})
 	if err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "password") {
+		if errors.Is(err, pdfiumerr.ErrPassword) || errors.Is(err, pdfiumerr.ErrSecurity) {
 			return Doc{}, 0, ErrPDFPassword
 		}
 		return Doc{}, 0, fmt.Errorf("extract: not a readable PDF: %w", err)
@@ -131,18 +164,25 @@ func pdfText(inst pdfium.Pdfium, data []byte, from, to int) (Doc, int, error) {
 		return Doc{}, 0, err
 	}
 	total := count.PageCount
-	from = max(0, from)
 	to = min(to, total, MaxPDFPages)
 
 	var doc Doc
-	size := 0
+	size, failures := 0, 0
 	for i := from; i < to; i++ {
+		doc.LastPage = i + 1
 		page, err := inst.GetPageText(&requests.GetPageText{
 			Page: requests.Page{ByIndex: &requests.PageByIndex{Document: opened.Document, Index: i}},
 		})
 		if err != nil {
-			continue // one broken page must not lose the rest
+			// One broken page is recorded and skipped; several in a row mean the engine
+			// itself died (trap, out of memory), and continuing would silently lose pages.
+			doc.FailedPages = append(doc.FailedPages, i+1)
+			if failures++; failures >= maxPageFailures {
+				return Doc{}, total, fmt.Errorf("extract: PDF engine failed at page %d: %w", i+1, err)
+			}
+			continue
 		}
+		failures = 0
 		text := tidy(page.Text)
 		if len([]rune(text)) < ScannedPageText {
 			doc.NeedsOCR = append(doc.NeedsOCR, i+1)
@@ -150,12 +190,17 @@ func pdfText(inst pdfium.Pdfium, data []byte, from, to int) (Doc, int, error) {
 		if text == "" {
 			continue
 		}
-		if size+len(text) > MaxOutputText {
+		if size+len(text) > maxText {
+			text = cutUTF8(text, maxText-size)
 			doc.Truncated = true
-			break
 		}
 		size += len(text)
-		doc.Sections = append(doc.Sections, Section{Page: i + 1, Text: text})
+		if text != "" {
+			doc.Sections = append(doc.Sections, Section{Page: i + 1, Text: text})
+		}
+		if doc.Truncated {
+			break
+		}
 	}
 	return doc, total, nil
 }
