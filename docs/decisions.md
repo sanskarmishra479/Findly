@@ -137,3 +137,9 @@ Test PC: Intel i5-12450H (8 cores / 12 threads), NVIDIA RTX 2050 (Vulkan), llama
   - Workers check for cancellation before starting an extraction.
   - Dedupe lookup + copy are one transaction (`store.CopyDuplicate`), so a source deleted in between can't produce an empty "done" copy. Known: copied vectors keep the source file's name as embedding title.
   - **Phase 4 (recorded):** partial PDFs (`status=partial`) are not finished yet; the deferred job and saving `LastPage` belong to Phase 4 task 4.
+- **2026-10-11 — T7 search:**
+  - **Query safety:** user text is never passed to FTS5 as syntax. `search.Parse` keeps only letter/digit runs (exactly how the `unicode61` tokenizer splits), every word is double-quoted, and words are joined with AND; the last word gets `*` while typing. `"quoted parts"` become required phrases. Tested with FTS5 operators, column filters, NUL, SQL-looking text and 1,000-word queries.
+  - Keyword: bm25 with the file-name column weighted 2×, best item per file. Semantic: `VectorCache` (all vectors in RAM) → Hamming top-200 with a max-heap → int8 re-rank → best item per file; hits below cosine 0.25 are dropped. Benchmark: **100k vectors in 1.4 ms** (budget 10 ms).
+  - Fusion: RRF k=60 plus a +0.05 boost when the query words appear verbatim (punctuation-insensitive: `INV-2024-0042` = `inv 2024 0042`) in the file name or snippet. Semantic-only hits are dropped when the query has a quoted phrase they don't contain.
+  - Filters (kind, folder, date) run in SQL for keyword hits and on file rows for semantic hits; folder filter uses `substr(path_key)` (no LIKE, so `%`/`_` in paths are safe) and requires a whole-folder prefix.
+  - Deleted files never appear even with a stale vector cache (results are joined to current file rows). If the embedder is unavailable, keyword results are still returned with the error.

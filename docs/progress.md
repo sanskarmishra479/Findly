@@ -22,7 +22,7 @@
 - [x] T4 `extract` — txt, md, csv, log, json, html, docx, odt, rtf + PDF (go-pdfium wasm, sandboxed)
 - [x] T5 `chunk`, `embed`, `vecfmt` (+ `sidecar`)
 - [x] T6 `index` (pipeline, priorities, dedupe, deletions, free tier)
-- [ ] T7 `search`
+- [x] T7 `search` (keyword + semantic + RRF + exact boost, filters)
 
 ## Notes for later phases
 - Phase 4: deferred job for partial PDFs (pages after 30); needs a `last_page` column (new migration).

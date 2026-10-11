@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -672,4 +673,188 @@ func (s *Store) CopyDuplicate(ctx context.Context, hash string, to int64) (copie
 		}
 	}
 	return len(items) > 0, tx.Commit()
+}
+
+// ---- used by search ----
+
+// Filter narrows search results (plan 9.11). Zero values mean "no filter".
+type Filter struct {
+	Kinds  []string // file kinds, e.g. "pdf", "doc"
+	Folder string   // only files under this folder
+	After  int64    // modified at or after (unix ns)
+	Before int64    // modified before (unix ns)
+}
+
+// sql returns a WHERE fragment over the files table aliased f, and its arguments.
+func (fl Filter) sql() (string, []any) {
+	var parts []string
+	var args []any
+	if len(fl.Kinds) > 0 {
+		parts = append(parts, "f.kind IN ("+strings.TrimSuffix(strings.Repeat("?,", len(fl.Kinds)), ",")+")")
+		for _, k := range fl.Kinds {
+			args = append(args, k)
+		}
+	}
+	if fl.Folder != "" {
+		prefix := pathKey(fl.Folder)
+		if !strings.HasSuffix(prefix, `\`) {
+			prefix += `\`
+		}
+		// substr comparison instead of LIKE: paths may contain % and _.
+		parts = append(parts, "substr(f.path_key, 1, ?) = ?")
+		args = append(args, len(prefix), prefix)
+	}
+	if fl.After != 0 {
+		parts = append(parts, "f.mtime >= ?")
+		args = append(args, fl.After)
+	}
+	if fl.Before != 0 {
+		parts = append(parts, "f.mtime < ?")
+		args = append(args, fl.Before)
+	}
+	if len(parts) == 0 {
+		return "1", nil
+	}
+	return strings.Join(parts, " AND "), args
+}
+
+// Match reports whether a file passes the filter (for results found outside SQL).
+func (fl Filter) Match(f File) bool {
+	if len(fl.Kinds) > 0 && !slices.Contains(fl.Kinds, f.Kind) {
+		return false
+	}
+	if fl.Folder != "" {
+		prefix := pathKey(fl.Folder)
+		if !strings.HasSuffix(prefix, `\`) {
+			prefix += `\`
+		}
+		if !strings.HasPrefix(pathKey(f.Path), prefix) {
+			return false
+		}
+	}
+	if fl.After != 0 && f.MTime < fl.After {
+		return false
+	}
+	if fl.Before != 0 && f.MTime >= fl.Before {
+		return false
+	}
+	return true
+}
+
+// KeywordHit is one keyword-index match.
+type KeywordHit struct {
+	ItemID  int64
+	FileID  int64
+	Kind    string // item kind; "name" for a file-name match
+	Locator string
+	Text    string  // item text (empty for name matches)
+	Rank    float64 // bm25: lower is better
+}
+
+// KeywordSearch runs an FTS5 MATCH expression (built by the search package, never raw
+// user input) and returns up to limit hits, best first.
+func (s *Store) KeywordSearch(ctx context.Context, match string, fl Filter, limit int) ([]KeywordHit, error) {
+	where, args := fl.sql()
+	q := `
+		SELECT i.id, i.file_id, i.kind, coalesce(i.locator, ''), coalesce(i.text, ''), bm25(items_fts, 2.0, 1.0)
+		FROM items_fts
+		JOIN items i ON i.id = items_fts.rowid
+		JOIN files f ON f.id = i.file_id
+		WHERE items_fts MATCH ? AND ` + where + `
+		ORDER BY bm25(items_fts, 2.0, 1.0)
+		LIMIT ?`
+	all := append([]any{match}, args...)
+	all = append(all, limit)
+	rows, err := s.db.QueryContext(ctx, q, all...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []KeywordHit
+	for rows.Next() {
+		var h KeywordHit
+		if err := rows.Scan(&h.ItemID, &h.FileID, &h.Kind, &h.Locator, &h.Text, &h.Rank); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// VectorRow is one stored vector with its item and file.
+type VectorRow struct {
+	ItemID int64
+	FileID int64
+	Vector Vector
+}
+
+// AllVectors streams every stored vector to fn (for the in-memory search cache).
+func (s *Store) AllVectors(ctx context.Context, fn func(VectorRow) error) error {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT v.item_id, i.file_id, v.bin, v.i8, v.scale
+		FROM vectors v JOIN items i ON i.id = v.item_id
+		ORDER BY v.item_id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var bin, i8 []byte
+	for rows.Next() {
+		var r VectorRow
+		var scale float64
+		if err := rows.Scan(&r.ItemID, &r.FileID, &bin, &i8, &scale); err != nil {
+			return err
+		}
+		if len(bin) != VectorDim/8 || len(i8) != VectorDim {
+			continue // damaged row: skip rather than crash (I-7)
+		}
+		copy(r.Vector.Bin[:], bin)
+		for j, b := range i8 {
+			r.Vector.I8[j] = int8(b)
+		}
+		r.Vector.Scale = float32(scale)
+		if err := fn(r); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+// ItemByID returns an item's file id, locator and text.
+func (s *Store) ItemByID(ctx context.Context, id int64) (fileID int64, locator, text string, err error) {
+	err = s.db.QueryRowContext(ctx,
+		`SELECT file_id, coalesce(locator, ''), coalesce(text, '') FROM items WHERE id = ?`, id).
+		Scan(&fileID, &locator, &text)
+	return
+}
+
+// FilesByID returns files by id (missing ids are left out).
+func (s *Store) FilesByID(ctx context.Context, ids []int64) (map[int64]File, error) {
+	out := make(map[int64]File, len(ids))
+	for start := 0; start < len(ids); start += 500 {
+		batch := ids[start:min(start+500, len(ids))]
+		args := make([]any, len(batch))
+		for i, id := range batch {
+			args[i] = id
+		}
+		rows, err := s.db.QueryContext(ctx, `
+			SELECT id, root_id, path, name, ext, kind, size, mtime, status
+			FROM files WHERE id IN (`+strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var f File
+			if err := rows.Scan(&f.ID, &f.RootID, &f.Path, &f.Name, &f.Ext, &f.Kind, &f.Size, &f.MTime, &f.Status); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[f.ID] = f
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
