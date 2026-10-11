@@ -1,0 +1,26 @@
+# Build output
+/build/bin/
+/dist/
+*.exe
+*.dll
+
+# Downloaded binaries and models (fetched by scripts, never committed)
+/third_party/
+*.gguf
+*.part*
+
+# Frontend
+node_modules/
+frontend/dist/
+
+# Secrets — never commit the license private key
+*.key
+*.pem
+.env*
+server/activation-worker/.dev.vars
+
+# Local / editor
+.vscode/
+.idea/
+*.log
+Thumbs.db
