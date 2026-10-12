@@ -29,4 +29,4 @@
 
 - [x] T8 CLI index/search/stats/remove
 - [x] T9 evals (26-file testbed, 31 queries, `cli eval`; Recall@5 = 1.000, MRR@10 = 1.000)
-- [ ] T10 file-integrity test
+- [x] T10 file-integrity test (`go test ./internal/integrity`)
