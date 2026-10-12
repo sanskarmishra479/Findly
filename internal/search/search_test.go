@@ -473,3 +473,23 @@ func TestFusePhraseInSpacelessScripts(t *testing.T) {
 		}
 	}
 }
+
+// Review round 2: a phrase mixing Latin and a spaceless script keeps whole-word ends on
+// the Latin side.
+func TestFusePhraseMixedScripts(t *testing.T) {
+	mk := func(text string) []Result {
+		return []Result{{File: store.File{ID: 1, Name: "x.txt"}, text: text, Meaning: true}}
+	}
+	if out := Fuse(Parse(`"cat 猫"`), nil, mk("concat 猫")); len(out) != 0 {
+		t.Errorf(`"cat 猫" kept for "concat 猫"`)
+	}
+	if out := Fuse(Parse(`"报告 report"`), nil, mk("报告 reporting")); len(out) != 0 {
+		t.Errorf(`"报告 report" kept for "报告 reporting"`)
+	}
+	if out := Fuse(Parse("cat 猫"), mk("concat 猫"), nil); len(out) != 1 || out[0].Exact {
+		t.Errorf("exact boost on a partial word: %+v", out)
+	}
+	if out := Fuse(Parse(`"report"`), nil, mk("年度report报告")); len(out) != 1 || !out[0].Exact {
+		t.Errorf("Latin word between Han letters not found: %+v", out)
+	}
+}

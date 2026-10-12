@@ -208,3 +208,10 @@ Three parallel review agents covered the whole phase; 8 High findings, all confi
 - **Free slots:** `queueSkipped` subtracts this scan's new files from the free room first.
 - **CLI:** the flags-after-query hint keeps the whole query and the flag values; words like `-5` are search words unless they name a real flag.
 - Accepted: `SkippedFiles` picks the newest skipped files and ignores the Desktop/Documents preference (only affects which files fill a few freed slots).
+
+## Phase 1 review — Medium fixes, round 3 (2026-10-12)
+- **Phrase ends:** `containsWords` matches a phrase as a substring, but each end must touch a space unless a letter on either side of that end is from a spaceless script. `"cat 猫"` no longer matches "concat 猫"; `"東京"` still matches "東京に行きます".
+- **Secret folders:** a new `IsSecretFolderName` covers folders (no extension rule, so "Website.asc" and "Bob.Key" are fine folders), used for subfolders during scans and for the chosen folder. Parent folders get every rule except the bare "secret" substring, which only counts as a whole word there, so `D:\KeePass\exports` is refused while Go test temp folders like "TestScanSkipsSecrets123" are not. UNC share names (`\server\Passwords`) are checked too.
+- `Indexer.AddRoot` checks the canonical path (".", 8.3 short names); the CLI checks before starting the model.
+- `EnsureModel` reads and writes in one write transaction, so the first app to record a model wins.
+- Accepted: names containing "secret" ("secretsauce recipes") are still refused as chosen folders and subfolders, because safety comes first. Freed free-tier slots taken by new files that then fail stay unused until the next scan.

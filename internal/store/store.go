@@ -1039,18 +1039,27 @@ var ErrModelChanged = errors.New("store: the index was built with a different mo
 // returns ErrModelChanged if the index was built with different ones.
 func (s *Store) EnsureModel(ctx context.Context, modelVersion string) error {
 	dim := strconv.Itoa(VectorDim)
-	have, ok, err := s.Meta(ctx, "model_version")
+	// One write transaction (the store opens them with BEGIN IMMEDIATE) for the read and
+	// the first write: two apps starting together cannot both see "no model" and
+	// overwrite each other, and a crash cannot leave only some of the keys written.
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		// One transaction: a crash after writing only model_version would otherwise
-		// leave an index that looks like it came from another model.
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return err
+	defer tx.Rollback()
+	meta := func(key string) (string, error) {
+		var v string
+		err := tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, key).Scan(&v)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
 		}
-		defer tx.Rollback()
+		return v, err
+	}
+	have, err := meta("model_version")
+	if err != nil {
+		return err
+	}
+	if have == "" {
 		for _, kv := range [][2]string{
 			{"vector_dim", dim},
 			{"created_at", time.Now().UTC().Format(time.RFC3339)},
@@ -1064,7 +1073,7 @@ func (s *Store) EnsureModel(ctx context.Context, modelVersion string) error {
 		}
 		return tx.Commit()
 	}
-	haveDim, _, err := s.Meta(ctx, "vector_dim")
+	haveDim, err := meta("vector_dim")
 	if err != nil {
 		return err
 	}

@@ -277,7 +277,9 @@ func shortName(p string) string {
 }
 
 // Full review #4: password-manager exports and credential stores are skipped (P-6).
-func TestScanSkipsPasswordManagerExports(t *testing.T) {
+// The name avoids "Password": Go puts the test name in its temp folder path, and a
+// chosen folder inside a "password" folder is refused.
+func TestScanSkipsManagerExports(t *testing.T) {
 	root := tree(t,
 		"ok.txt",
 		"bitwarden_export_20250101.json", "lastpass_export.csv", "logins.csv", "1Password Export.1pux", "github-recovery-codes.txt", "Login Data", "rclone.conf", "AuthKey_ABC.p8", "wallet seed phrase.txt",
@@ -333,5 +335,24 @@ func TestSecretFolderUsesChildRulesForTheFolderItself(t *testing.T) {
 		if SecretFolder(p) {
 			t.Errorf("%s refused", p)
 		}
+	}
+}
+
+// Review round 2: parents of the chosen folder, share names and folder "extensions".
+func TestSecretFolderParentsSharesAndExtensions(t *testing.T) {
+	for _, p := range []string{`D:\KeePass\exports`, `D:\MyPasswords\docs`, `D:\Bitwarden\exports`,
+		`\server\Passwords`, `\server\Passwords\`, `\?\UNC\srv\KeePass`, `\srv\share\.aws\x`} {
+		if !SecretFolder(p) {
+			t.Errorf("%s allowed", p)
+		}
+	}
+	for _, p := range []string{`D:\Website.asc`, `D:\Projects.Key`, `D:\photos.gpg`, `D:\docs.ppk`,
+		`D:\MySecretsArchive2\..\Notes`, `\server\share`, `\server\share\Docs`} {
+		if SecretFolder(p) {
+			t.Errorf("%s refused", p)
+		}
+	}
+	if IsSecretFolderName("Website.asc") || !IsSecretName("website.asc") {
+		t.Error("extension rule must apply to files only")
 	}
 }

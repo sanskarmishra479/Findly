@@ -84,8 +84,21 @@ var secretNames = map[string]bool{
 // the user chose.
 func IsSecretName(name string) bool {
 	n := strings.ToLower(name)
+	return secretExts[filepath.Ext(n)] || secretNameRules(n) || containsSecret(n)
+}
+
+// IsSecretFolderName is IsSecretName for folders: the extension rules are left out, since
+// a folder named "Website.asc" or "Bob.Key" is not a key file.
+func IsSecretFolderName(name string) bool {
+	n := strings.ToLower(name)
+	return credentialDirs[n] || secretWords(n) || secretNameRules(n) || containsSecret(n)
+}
+
+// secretNameRules are the name rules shared by files and folders (n is lower case),
+// apart from extensions and the bare "secret" match.
+func secretNameRules(n string) bool {
 	switch {
-	case secretExts[filepath.Ext(n)], secretNames[n],
+	case secretNames[n],
 		n == ".env", strings.HasPrefix(n, ".env."), // .env, .env.local — but not ".envelope.txt"
 		strings.HasPrefix(n, "id_rsa"), strings.HasPrefix(n, "id_ed25519"),
 		strings.HasPrefix(n, "id_ecdsa"), strings.HasPrefix(n, "id_dsa"),
@@ -94,8 +107,7 @@ func IsSecretName(name string) bool {
 		// Password-manager exports: bitwarden_export_20250101.json, lastpass_export.csv, …
 		strings.Contains(n, "bitwarden"), strings.Contains(n, "lastpass"), strings.Contains(n, "1password"),
 		strings.Contains(n, "keepass"), strings.Contains(n, "dashlane"), strings.Contains(n, "nordpass"),
-		codesOrSeed(n),
-		containsSecret(n):
+		codesOrSeed(n):
 		return true
 	}
 	return false
@@ -249,7 +261,7 @@ func (s *scanner) entries(entries []safefs.Info, inCodeProject bool) error {
 			if skipDirs[strings.ToLower(e.Name)] {
 				continue
 			}
-			if IsSecretName(e.Name) { // e.g. "Passwords", "Secrets", "credentials"
+			if IsSecretFolderName(e.Name) { // e.g. "Passwords", "Secrets", "credentials"
 				s.stats.Secret++
 				continue
 			}
@@ -342,20 +354,31 @@ var credentialDirs = map[string]bool{
 }
 
 // SecretFolder reports whether path is, or is inside, a credentials folder. The folder
-// itself gets the same name rules as a subfolder found while scanning ("KeePass",
-// "MyPasswords"); its parents get the narrower whole-word rules, so a parent like
-// "TestScanSkipsSecrets123" does not hide everything below it.
+// itself gets the same rules as a subfolder found while scanning ("KeePass",
+// "MySecrets"). Its parents get the same rules except the bare "secret" substring, which
+// only counts as a whole word there: a parent like "TestScanSkipsSecrets123" (a Go test
+// folder) must not hide everything below it.
 func SecretFolder(path string) bool {
+	path = filepath.Clean(path)
 	vol := filepath.VolumeName(path)
-	parts := strings.Split(strings.TrimPrefix(filepath.Clean(path), vol), `\`)
+	parts := strings.Split(strings.TrimPrefix(path, vol), `\`)
+	// For \\server\share and \\?\UNC\server\share the share name is part of the volume.
+	if strings.HasPrefix(vol, `\\`) {
+		parts = append([]string{vol[strings.LastIndex(vol, `\`)+1:]}, parts...)
+	}
+	last := len(parts) - 1
+	for last > 0 && parts[last] == "" { // "\\srv\Passwords\" has an empty last part
+		last--
+	}
 	for i, part := range parts {
 		if part == "" {
 			continue
 		}
-		if credentialDirs[strings.ToLower(part)] || secretWords(part) {
+		n := strings.ToLower(part)
+		if credentialDirs[n] || secretWords(n) || secretNameRules(n) {
 			return true
 		}
-		if i == len(parts)-1 && IsSecretName(part) {
+		if i == last && containsSecret(n) {
 			return true
 		}
 	}

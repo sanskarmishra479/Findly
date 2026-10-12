@@ -17,6 +17,7 @@ import (
 	"github.com/sanskarmishra479/findly/internal/appfs"
 	"github.com/sanskarmishra479/findly/internal/index"
 	"github.com/sanskarmishra479/findly/internal/safefs"
+	"github.com/sanskarmishra479/findly/internal/scan"
 	"github.com/sanskarmishra479/findly/internal/search"
 	"github.com/sanskarmishra479/findly/internal/store"
 )
@@ -37,6 +38,11 @@ func runIndex(args []string) error {
 	}
 	if info, err := safefs.Stat(folder); err != nil || !info.IsDir() {
 		return fmt.Errorf("%s is not a folder", fs.Arg(0))
+	}
+
+	// Checked again when saving; here it saves waiting for the model to start.
+	if scan.SecretFolder(folder) {
+		return fmt.Errorf("%w: %s", scan.ErrSecretRoot, folder)
 	}
 
 	en, err := openEngine(ef)
@@ -99,11 +105,10 @@ func runSearch(args []string) error {
 	// Go's flag package stops at the first non-flag argument, so in
 	// `cli search "rent due" -n 1` the "-n 1" would silently become search words.
 	// A word like "-5" is a query word; only names of real flags are refused.
-	for i, a := range fs.Args()[1:] {
+	for _, a := range fs.Args()[1:] {
 		name, _, _ := strings.Cut(strings.TrimLeft(a, "-"), "=")
 		if strings.HasPrefix(a, "-") && fs.Lookup(name) != nil {
-			return fmt.Errorf("put flags before the query: cli search %s \"%s\"",
-				strings.Join(fs.Args()[i+1:], " "), strings.Join(fs.Args()[:i+1], " "))
+			return fmt.Errorf(`flag %s is after the query; put flags first, e.g. cli search -n 5 "your words"`, a)
 		}
 	}
 	query := strings.Join(fs.Args(), " ")

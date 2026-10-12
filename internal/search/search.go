@@ -219,15 +219,7 @@ func Fuse(q Query, keyword, semantic []Result) []Result {
 		hay := " " + normalize(strings.ToLower(r.File.Name+"\n"+r.text)) + " "
 		has := func(s string) bool {
 			n := normalize(strings.ToLower(s))
-			if n == "" {
-				return false
-			}
-			// Chinese, Japanese and Thai write without spaces, so a whole sentence is one
-			// "word" and a whole-word check would never match inside it.
-			if spaceless(n) {
-				return strings.Contains(hay, n)
-			}
-			return strings.Contains(hay, " "+n+" ")
+			return n != "" && containsWords(hay, n)
 		}
 		phrasesOK := true
 		for _, p := range q.Phrases {
@@ -254,16 +246,40 @@ func Fuse(q Query, keyword, semantic []Result) []Result {
 	return out
 }
 
-// spaceless reports whether s contains letters of a script written without spaces
-// between words.
-func spaceless(s string) bool {
-	for _, r := range s {
-		if unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Thai,
-			unicode.Lao, unicode.Khmer, unicode.Myanmar) {
+// containsWords reports whether phrase appears in hay (space-padded) as whole words: each
+// end must touch a space, unless the letters on either side of that end belong to a
+// script written without spaces (Chinese, Japanese, Thai, ...), where a word can sit
+// inside a longer run of letters. So "cat" does not match "cats", but "東京" matches
+// "東京に行きます", and "cat 猫" does not match "concat 猫".
+func containsWords(hay, phrase string) bool {
+	first, _ := utf8.DecodeRuneInString(phrase)
+	last, _ := utf8.DecodeLastRuneInString(phrase)
+	for i := 0; ; {
+		j := strings.Index(hay[i:], phrase)
+		if j < 0 {
+			return false
+		}
+		start, end := i+j, i+j+len(phrase)
+		before, _ := utf8.DecodeLastRuneInString(hay[:start])
+		after, _ := utf8.DecodeRuneInString(hay[end:])
+		if edgeOK(before, first) && edgeOK(after, last) {
 			return true
 		}
+		_, size := utf8.DecodeRuneInString(hay[start:])
+		i = start + size
 	}
-	return false
+}
+
+// edgeOK reports whether a phrase may end at the boundary between its own letter in and
+// the neighboring letter out.
+func edgeOK(out, in rune) bool {
+	return out == ' ' || out == utf8.RuneError || spaceless(out) || spaceless(in)
+}
+
+// spaceless reports whether r belongs to a script written without spaces between words.
+func spaceless(r rune) bool {
+	return unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Thai,
+		unicode.Lao, unicode.Khmer, unicode.Myanmar)
 }
 
 // normalize collapses punctuation to spaces so "INV-2024-001" matches "inv 2024 001".

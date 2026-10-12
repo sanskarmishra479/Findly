@@ -779,3 +779,18 @@ func TestEnsureModel(t *testing.T) {
 		t.Fatal("created_at not recorded")
 	}
 }
+
+// Review round 2: a second app with another model cannot overwrite the first one's record.
+func TestEnsureModelFirstWriterWins(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if err := s.EnsureModel(ctx, "model-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsureModel(ctx, "model-b"); !errors.Is(err, ErrModelChanged) {
+		t.Fatalf("got %v", err)
+	}
+	if v, _, _ := s.Meta(ctx, "model_version"); v != "model-a" {
+		t.Fatalf("model_version = %q", v)
+	}
+}

@@ -92,6 +92,12 @@ type job struct {
 // they are saved: a stored one would fail every later index run and block adding its
 // parent ("folders overlap").
 func (ix *Indexer) AddRoot(ctx context.Context, path string) (store.Root, error) {
+	// The real path: "." or a short name like PASSWO~1 must not get past the check.
+	real, err := safefs.Canonical(path)
+	if err != nil {
+		return store.Root{}, fmt.Errorf("%w: %v", scan.ErrBadRoot, err)
+	}
+	path = real
 	if scan.SecretFolder(filepath.Clean(path)) {
 		return store.Root{}, fmt.Errorf("%w: %s", scan.ErrSecretRoot, path)
 	}
