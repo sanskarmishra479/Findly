@@ -118,6 +118,7 @@ func TestRealServer(t *testing.T) {
 	}
 	root, _ := filepath.Abs(filepath.Join("..", ".."))
 	cfg := Config{
+		WorkDir:   t.TempDir(),
 		ServerExe: filepath.Join(root, "third_party", "llama", "cpu", "llama-server.exe"),
 		Model:     filepath.Join(root, "third_party", "models", "embeddinggemma-2-Q8_0.gguf"),
 	}
@@ -181,6 +182,7 @@ func realConfig(t *testing.T) Config {
 	}
 	root, _ := filepath.Abs(filepath.Join("..", ".."))
 	cfg := Config{
+		WorkDir:   t.TempDir(),
 		ServerExe: filepath.Join(root, "third_party", "llama", "cpu", "llama-server.exe"),
 		Model:     filepath.Join(root, "third_party", "models", "embeddinggemma-2-Q8_0.gguf"),
 	}

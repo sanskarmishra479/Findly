@@ -32,6 +32,10 @@ const (
 	DirLogs    = "logs"
 	DirBin     = "bin"
 	DirLicense = "license"
+	// DirGPU is the working and cache folder for helper programs (llama-server): GPU
+	// drivers write logs and shader caches relative to it, and they must stay inside the
+	// app data folder (plan I-3), not in the install folder.
+	DirGPU = "gpu"
 )
 
 // ErrOutside is returned for paths that are absolute or leave the app directory.
@@ -65,7 +69,7 @@ func Open(dir string) (*FS, error) {
 		return nil, err
 	}
 	f := &FS{root: root, path: filepath.Clean(dir)}
-	for _, sub := range []string{DirModels, DirIndex, DirThumbs, DirLogs, DirBin, DirLicense} {
+	for _, sub := range []string{DirModels, DirIndex, DirThumbs, DirLogs, DirBin, DirLicense, DirGPU} {
 		if err := root.MkdirAll(sub, 0o700); err != nil {
 			root.Close()
 			return nil, err

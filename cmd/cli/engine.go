@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sanskarmishra479/findly/internal/appfs"
 	"github.com/sanskarmishra479/findly/internal/embed"
@@ -37,7 +38,7 @@ type engine struct {
 }
 
 func openEngine(e engineFlags) (*engine, error) {
-	dir, err := filepath.Abs(e.dataDir)
+	dir, err := e.dataPath()
 	if err != nil {
 		return nil, err
 	}
@@ -53,6 +54,9 @@ func openEngine(e engineFlags) (*engine, error) {
 	st, err := store.Open(dbPath)
 	if err != nil {
 		afs.Close()
+		if store.IsCorrupt(err) {
+			return nil, fmt.Errorf("%w (your files are not affected; run \"cli reset\" to delete the damaged index, then index your folders again)", err)
+		}
 		return nil, err
 	}
 	return &engine{fs: afs, store: st}, nil
@@ -67,7 +71,12 @@ func (en *engine) startEmbedder(ctx context.Context, e engineFlags, lowPriority 
 	if err != nil {
 		return err
 	}
+	gpuDir, err := en.fs.Path(appfs.DirGPU)
+	if err != nil {
+		return err
+	}
 	cfg := embed.Config{
+		WorkDir:     gpuDir,
 		ServerExe:   filepath.Join(tp, "llama", e.backend, "llama-server.exe"),
 		Model:       filepath.Join(tp, "models", "embeddinggemma-2-Q8_0.gguf"),
 		LowPriority: lowPriority,
@@ -126,4 +135,13 @@ func absFolder(p string) (string, error) {
 		return real, nil
 	}
 	return abs, nil // a folder that no longer exists (e.g. for remove)
+}
+
+// dataPath returns the absolute app data folder. An empty -data is refused: it would
+// silently turn the current folder into the app data folder.
+func (e engineFlags) dataPath() (string, error) {
+	if strings.TrimSpace(e.dataDir) == "" {
+		return "", errors.New("-data must not be empty (default: the Findly folder in %LOCALAPPDATA%)")
+	}
+	return filepath.Abs(e.dataDir)
 }

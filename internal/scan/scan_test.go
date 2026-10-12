@@ -275,3 +275,15 @@ func shortName(p string) string {
 	}
 	return windows.UTF16ToString(buf[:n])
 }
+
+// Full review #4: password-manager exports and credential stores are skipped (P-6).
+func TestScanSkipsPasswordManagerExports(t *testing.T) {
+	root := tree(t,
+		"ok.txt",
+		"bitwarden_export_20250101.json", "lastpass_export.csv", "logins.csv", "1Password Export.1pux",
+		"vault.kdb", "infra.tfstate", "wallet.dat", ".npmrc",
+		".docker/config.json", ".password-store/bank.gpg",
+	)
+	got, _ := found(t, root, Options{})
+	equal(t, got, "ok.txt")
+}

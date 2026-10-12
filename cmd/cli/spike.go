@@ -174,7 +174,7 @@ func startLlamaServer(ctx context.Context, backend string, imgTokens int) (*llam
 		"--port", strconv.Itoa(port),
 		"--offline",        // never touch the network
 		"--no-mmproj-auto", // never auto-download a projector
-		"--no-webui",       // no browser UI
+		"--no-ui",          // no browser UI
 		"--batch-size", "2048",
 		"--ubatch-size", "2048", // embeddings need the whole input in one batch (30 s audio ≈ 750 tokens)
 	}
@@ -186,10 +186,18 @@ func startLlamaServer(ctx context.Context, backend string, imgTokens int) (*llam
 	// Clean environment: llama-server reads LLAMA_ARG_* / HF_TOKEN from env, which could
 	// otherwise switch on network access or its file-reading tools. Pass only what Windows needs,
 	// plus the API key (env, not argv, so it doesn't show up in process listings).
+	// GPU drivers write logs/caches into the working folder and LOCALAPPDATA: keep them in
+	// a temporary folder instead of next to llama-server.exe.
+	work, err := os.MkdirTemp("", "findly-spike-gpu-")
+	if err != nil {
+		return nil, err
+	}
+	cmd.Dir = work
 	cmd.Env = []string{
 		"SystemRoot=" + os.Getenv("SystemRoot"),
 		"PATH=" + filepath.Dir(exe),
 		"LLAMA_API_KEY=" + key,
+		"LOCALAPPDATA=" + work, "APPDATA=" + work, "TEMP=" + work, "TMP=" + work,
 	}
 	logPath := filepath.Join(os.TempDir(), "findly-spike-llama-server.log")
 	logFile, err := os.Create(logPath)

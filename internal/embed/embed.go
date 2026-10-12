@@ -60,6 +60,11 @@ type Config struct {
 	MMProj      string // vision+audio projector .gguf; empty = text only
 	Threads     int    // 0 = half the CPU cores
 	LowPriority bool   // below-normal priority while indexing
+	// WorkDir (required) is the server's working folder and its LOCALAPPDATA/APPDATA/TEMP:
+	// GPU drivers write logs and shader caches there. Use appfs DirGPU, so nothing is
+	// written outside the app data folder (I-3). Without it, the NVIDIA driver created
+	// "NVIDIA CorporationMdlogs" next to llama-server.exe.
+	WorkDir string
 }
 
 // Vector is one embedding in both stored forms.
@@ -75,6 +80,10 @@ var (
 	// ErrInput means this particular input could not be embedded (e.g. too long even
 	// after cutting). The indexer marks the file failed and continues.
 	ErrInput = errors.New("embed: input cannot be embedded")
+	// ErrCrashed (always together with ErrServer) means llama-server exited while handling
+	// the request. The next request restarts it; if the same input crashes it again, the
+	// caller should give up on that input and continue with others.
+	ErrCrashed = errors.New("embed: embedding server crashed during the request")
 )
 
 // Server is a running llama-server. Safe for concurrent use.
@@ -103,7 +112,7 @@ type cacheEntry struct {
 
 // Start launches llama-server and waits until it is ready.
 func Start(ctx context.Context, cfg Config) (*Server, error) {
-	for _, p := range []string{cfg.ServerExe, cfg.Model} {
+	for _, p := range []string{cfg.ServerExe, cfg.Model, cfg.WorkDir} {
 		if !filepath.IsAbs(p) {
 			return nil, fmt.Errorf("embed: path %q must be absolute", p)
 		}
@@ -202,7 +211,13 @@ func (s *Server) launchOnce() error {
 	proc, err := sidecar.Start(s.cfg.ServerExe, args, sidecar.Options{
 		// API key via env, not argv, so it does not show in process listings. Nothing else
 		// is passed, so no LLAMA_ARG_* variable can enable network or file tools.
-		Env:         []string{"PATH=" + filepath.Dir(s.cfg.ServerExe), "LLAMA_API_KEY=" + key},
+		Env: []string{
+			"PATH=" + filepath.Dir(s.cfg.ServerExe),
+			"LLAMA_API_KEY=" + key,
+			"LOCALAPPDATA=" + s.cfg.WorkDir, "APPDATA=" + s.cfg.WorkDir,
+			"TEMP=" + s.cfg.WorkDir, "TMP=" + s.cfg.WorkDir,
+		},
+		Dir:         s.cfg.WorkDir,
 		LowPriority: s.cfg.LowPriority,
 		Output:      s.log,
 	})
@@ -382,6 +397,10 @@ func (s *Server) embed(ctx context.Context, inputs []string) ([]Vector, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err() // the caller gave up; not the server's fault
 		}
+		if s.crashed() {
+			// The process died while handling this request: maybe this input crashes it.
+			return nil, fmt.Errorf("%w: %w: %v", ErrServer, ErrCrashed, err)
+		}
 		return nil, fmt.Errorf("%w: request: %v", ErrServer, err)
 	}
 	defer resp.Body.Close()
@@ -514,4 +533,22 @@ func tokensInError(msg string) int {
 		return 0
 	}
 	return n
+}
+
+// crashed reports whether the server process has exited, waiting briefly: a broken
+// connection is often noticed a moment before the process exit is.
+func (s *Server) crashed() bool {
+	for range 20 {
+		s.mu.Lock()
+		p := s.proc
+		s.mu.Unlock()
+		if p == nil {
+			return true
+		}
+		if exited, _ := p.Exited(); exited {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
 }

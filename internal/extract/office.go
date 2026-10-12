@@ -4,6 +4,7 @@ package extract
 
 import (
 	"archive/zip"
+	"bufio"
 	"encoding/binary"
 	"encoding/xml"
 	"errors"
@@ -72,25 +73,63 @@ func openZipPart(path, part string) (io.ReadCloser, func(), error) {
 	return nil, nil, fmt.Errorf("%w: %s in %s", errNotFound, part, path)
 }
 
-// zipEntryCount reads the entry count from the zip's end-of-central-directory record
-// (the last 22..65557 bytes) without building the directory.
+// zipEntryCount counts the entries of a zip's central directory by walking the headers
+// themselves, refusing more than maxZipEntries, before Go's zip.NewReader builds its
+// in-memory directory. The count stored in the end-of-directory record is NOT trusted:
+// Go's reader ignores it and keeps reading headers, so a forged count (real count mod
+// 65536) let a 186 MB file with 1.9 million entries through (508 MB of memory).
 func zipEntryCount(r io.ReaderAt, size int64) (int, error) {
-	const eocdLen, maxComment = 22, 65535
+	const (
+		eocdLen, maxComment = 22, 65535
+		eocdSig             = 0x06054b50
+		headerSig           = 0x02014b50
+		headerLen           = 46
+	)
 	n := min(size, eocdLen+maxComment)
 	buf := make([]byte, n)
 	if _, err := r.ReadAt(buf, size-n); err != nil && !errors.Is(err, io.EOF) {
 		return 0, err
 	}
+	eocd := -1
 	for i := len(buf) - eocdLen; i >= 0; i-- {
-		if binary.LittleEndian.Uint32(buf[i:]) == 0x06054b50 {
-			count := binary.LittleEndian.Uint16(buf[i+10:])
-			if count == 0xFFFF { // ZIP64: never needed by a real document
-				return 0, fmt.Errorf("%w: ZIP64 archives are not supported", ErrTooLarge)
-			}
-			return int(count), nil
+		if binary.LittleEndian.Uint32(buf[i:]) == eocdSig {
+			eocd = i
+			break
 		}
 	}
-	return 0, errors.New("extract: not a valid document (no zip directory)")
+	if eocd < 0 {
+		return 0, errors.New("extract: not a valid document (no zip directory)")
+	}
+	if binary.LittleEndian.Uint16(buf[eocd+10:]) == 0xFFFF ||
+		binary.LittleEndian.Uint32(buf[eocd+16:]) == 0xFFFFFFFF {
+		return 0, fmt.Errorf("%w: ZIP64 archives are not supported", ErrTooLarge)
+	}
+	dirStart := int64(binary.LittleEndian.Uint32(buf[eocd+16:]))
+	if dirStart >= size {
+		return 0, errors.New("extract: not a valid document (bad zip directory offset)")
+	}
+
+	// Walk the headers: 46 fixed bytes, then name, extra field and comment.
+	br := bufio.NewReaderSize(io.NewSectionReader(r, dirStart, size-dirStart), 64<<10)
+	head := make([]byte, headerLen)
+	count := 0
+	for {
+		if _, err := io.ReadFull(br, head); err != nil {
+			return count, nil // end of data: the walk is complete
+		}
+		if binary.LittleEndian.Uint32(head) != headerSig {
+			return count, nil // the end-of-directory record (or junk) follows the headers
+		}
+		if count++; count > maxZipEntries {
+			return count, fmt.Errorf("%w: more than %d entries", ErrTooLarge, maxZipEntries)
+		}
+		skip := int64(binary.LittleEndian.Uint16(head[28:])) +
+			int64(binary.LittleEndian.Uint16(head[30:])) +
+			int64(binary.LittleEndian.Uint16(head[32:]))
+		if _, err := br.Discard(int(skip)); err != nil {
+			return count, nil
+		}
+	}
 }
 
 // xmlRules describe how to turn one XML format into text.

@@ -47,6 +47,8 @@ var (
 	ErrPDFBusy = errors.New("extract: PDF engine busy")
 	// ErrPDFTimeout means this PDF took too long and its engine was stopped.
 	ErrPDFTimeout = errors.New("extract: PDF took too long")
+	// ErrPDFCrash means extraction panicked; the file is marked failed, the app keeps running.
+	ErrPDFCrash = errors.New("extract: PDF engine crashed on this file")
 )
 
 var (
@@ -101,8 +103,8 @@ func ClosePDF() error {
 // pages in the file; doc.LastPage is the last page processed (1-based), so a deferred
 // job can continue from there.
 func PDFPages(path string, from, to, maxText int) (doc Doc, total int, err error) {
-	if from < 0 || to < from {
-		return Doc{}, 0, fmt.Errorf("extract: bad page range %d..%d", from, to)
+	if from < 0 || to < from || maxText < 0 {
+		return Doc{}, 0, fmt.Errorf("extract: bad page range %d..%d or text budget %d", from, to, maxText)
 	}
 	info, err := safefs.Stat(path)
 	if err != nil {
@@ -111,22 +113,24 @@ func PDFPages(path string, from, to, maxText int) (doc Doc, total int, err error
 	if info.Size > MaxPDFFile {
 		return Doc{}, 0, fmt.Errorf("%w: %s (%d bytes)", ErrTooLarge, path, info.Size)
 	}
-	data, err := safefs.ReadFile(path, MaxPDFFile)
-	if err != nil {
-		return Doc{}, 0, err
-	}
 
 	pool, err := pdfEngine()
 	if err != nil {
 		return Doc{}, 0, err
 	}
-	// Waiting for a free engine has its own deadline, so a queued PDF still gets the
-	// full extraction time once it starts.
+	// Wait for a free engine BEFORE reading the file: otherwise every queued worker holds
+	// up to 128 MB of PDF bytes while waiting (measured 979 MB with 6 workers). Waiting
+	// has its own deadline, so a queued PDF still gets the full extraction time.
 	waitCtx, cancelWait := context.WithTimeout(context.Background(), pdfWait)
 	inst, err := pool.GetInstanceWithContext(waitCtx)
 	cancelWait()
 	if err != nil {
 		return Doc{}, 0, fmt.Errorf("%w: %v", ErrPDFBusy, err)
+	}
+	data, err := readPDF(path)
+	if err != nil {
+		inst.Close()
+		return Doc{}, 0, err
 	}
 
 	type result struct {
@@ -136,12 +140,23 @@ func PDFPages(path string, from, to, maxText int) (doc Doc, total int, err error
 	}
 	done := make(chan result, 1) // buffered: the goroutine never blocks if we time out
 	go func() {
-		d, n, err := pdfText(inst, data, from, to, maxText)
+		// A panic here (a bug, or a library failing on a hostile PDF) would otherwise
+		// crash the whole app, because no caller can recover a panic in this goroutine.
+		defer func() {
+			if p := recover(); p != nil {
+				done <- result{err: fmt.Errorf("%w: %v", ErrPDFCrash, p)}
+			}
+		}()
+		d, n, err := pdfTextFn(inst, data, from, to, maxText)
 		done <- result{d, n, err}
 	}()
 	select {
 	case r := <-done:
-		inst.Close()
+		if errors.Is(r.err, ErrPDFCrash) {
+			inst.Kill() // its state is unknown after a panic: never reuse it
+		} else {
+			inst.Close()
+		}
 		return r.doc, r.total, r.err
 	case <-time.After(pdfTimeout):
 		inst.Kill() // stops the hung WebAssembly call; the pool replaces the instance
@@ -204,3 +219,9 @@ func pdfText(inst pdfium.Pdfium, data []byte, from, to, maxText int) (Doc, int, 
 	}
 	return doc, total, nil
 }
+
+// Test hooks (variables so tests can observe ordering and inject failures).
+var (
+	readPDF   = func(path string) ([]byte, error) { return safefs.ReadFile(path, MaxPDFFile) }
+	pdfTextFn = pdfText
+)

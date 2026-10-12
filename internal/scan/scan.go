@@ -52,7 +52,8 @@ var skipDirs = map[string]bool{
 	"appdata": true, "$recycle.bin": true, "system volume information": true,
 	"node_modules": true, ".git": true, ".venv": true, "venv": true, "__pycache__": true, ".cache": true,
 	// credentials (P-6)
-	".ssh": true, ".gnupg": true, ".aws": true, ".azure": true, ".kube": true,
+	".ssh": true, ".gnupg": true, ".aws": true, ".azure": true, ".kube": true, ".docker": true,
+	".password-store": true, ".terraform": true,
 }
 
 // A folder containing one of these is a code project: only images inside it are indexed.
@@ -67,11 +68,14 @@ var skipFileNames = map[string]bool{"thumbs.db": true, "desktop.ini": true}
 var secretExts = map[string]bool{
 	".pem": true, ".key": true, ".pfx": true, ".p12": true, ".kdbx": true, ".ovpn": true, ".env": true,
 	".ppk": true, ".jks": true, ".keystore": true, ".gpg": true, ".asc": true,
+	".kdb": true, ".psafe3": true, ".1pux": true, ".1pif": true, ".agilekeychain": true, ".opvault": true,
+	".tfstate": true, ".tfvars": true,
 }
 
 // Exact file names of credential stores.
 var secretNames = map[string]bool{
 	".netrc": true, "_netrc": true, ".git-credentials": true, ".pgpass": true, "accesskeys.csv": true,
+	"logins.csv": true, "logins.json": true, "key4.db": true, "wallet.dat": true, ".npmrc": true, ".pypirc": true,
 }
 
 // IsSecretName reports file or folder names that look like keys or secrets (P-6). Such
@@ -86,6 +90,9 @@ func IsSecretName(name string) bool {
 		strings.HasPrefix(n, "id_ecdsa"), strings.HasPrefix(n, "id_dsa"),
 		strings.Contains(n, "password"), strings.Contains(n, "passwd"),
 		strings.Contains(n, "credential"),
+		// Password-manager exports: bitwarden_export_20250101.json, lastpass_export.csv, …
+		strings.Contains(n, "bitwarden"), strings.Contains(n, "lastpass"), strings.Contains(n, "1password"),
+		strings.Contains(n, "keepass"), strings.Contains(n, "dashlane"), strings.Contains(n, "nordpass"),
 		containsSecret(n):
 		return true
 	}
@@ -172,7 +179,7 @@ func Root(ctx context.Context, root string, opts Options, fn func(File) error) (
 		if c, err := safefs.Canonical(e); err == nil {
 			e = c
 		}
-		s.excludes = append(s.excludes, strings.TrimRight(filepath.Clean(e), `\`))
+		s.excludes = append(s.excludes, safefs.PathKey(e))
 	}
 	return s.stats, s.entries(entries, isCodeProject(entries))
 }
@@ -285,12 +292,14 @@ func (s *scanner) file(e safefs.Info, inCodeProject bool) error {
 
 // excluded reports whether path is an unticked folder or inside one.
 func (s *scanner) excluded(path string) bool {
-	for _, ex := range s.excludes {
-		if len(path) < len(ex) || !strings.EqualFold(path[:len(ex)], ex) {
-			continue
-		}
-		// Whole folder name must match: "C:\private" excludes "C:\private\x" but not "C:\privateer".
-		if len(path) == len(ex) || path[len(ex)] == '\\' || strings.HasSuffix(ex, `:`) {
+	if len(s.excludes) == 0 {
+		return false
+	}
+	k := safefs.PathKey(path)
+	for _, ex := range s.excludes { // already in PathKey form
+		// Whole folder name must match: "C:\private" excludes "C:\private\x" but not
+		// "C:\privateer". A drive-root key such as `D:\` already ends in a separator.
+		if k == ex || strings.HasPrefix(k, strings.TrimSuffix(ex, `\`)+`\`) {
 			return true
 		}
 	}

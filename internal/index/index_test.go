@@ -438,3 +438,78 @@ func TestCancelStopsQuickly(t *testing.T) {
 		t.Fatalf("cancel took %v", d)
 	}
 }
+
+// crashingEmbedder crashes on any passage containing "poison"; it counts calls.
+type crashingEmbedder struct {
+	fakeEmbedder
+	calls int
+}
+
+func (c *crashingEmbedder) EmbedPassages(ctx context.Context, title string, texts []string) ([]embed.Vector, error) {
+	c.calls++
+	for _, t := range texts {
+		if strings.Contains(t, "poison") {
+			return nil, fmt.Errorf("%w: %w: connection reset", embed.ErrServer, embed.ErrCrashed)
+		}
+	}
+	return c.fakeEmbedder.EmbedPassages(ctx, title, texts)
+}
+
+// Full review #8 (plan 5): a file that crashes the server is retried once, then marked
+// failed, and indexing continues with the other files.
+func TestCrashingFileIsSkipped(t *testing.T) {
+	e := newEnv(t)
+	emb := &crashingEmbedder{}
+	e.ix.Embedder = emb
+	e.write("a.txt", "fine text one")
+	e.write("bad.txt", "poison pill content")
+	e.write("c.txt", "fine text two")
+	st := e.run()
+	if st.Indexed != 2 || st.Failed != 1 {
+		t.Fatalf("stats = %+v", st)
+	}
+	if f := e.file("bad.txt"); f.Status != store.StatusFailed || !strings.Contains(f.Error, "crashed") {
+		t.Fatalf("bad file: %+v", f)
+	}
+}
+
+// …but if several files in a row crash it, the server is broken: stop, don't fail them all.
+func TestServerCrashingOnEverythingStopsRun(t *testing.T) {
+	e := newEnv(t)
+	e.ix.Embedder = &crashingEmbedder{}
+	for i := range 6 {
+		e.write(fmt.Sprintf("p%d.txt", i), "poison everywhere")
+	}
+	_, err := e.ix.IndexRoot(context.Background(), e.root)
+	if !errors.Is(err, ErrEmbedder) {
+		t.Fatalf("got %v, want ErrEmbedder", err)
+	}
+	failed := 0
+	for i := range 6 {
+		if e.file(fmt.Sprintf("p%d.txt", i)).Status == store.StatusFailed {
+			failed++
+		}
+	}
+	if failed >= maxCrashFiles {
+		t.Fatalf("%d files marked failed; the run should stop before blaming them all", failed)
+	}
+}
+
+// Full review #10: cancelling during embedding is reported as cancellation.
+func TestCancelDuringEmbedIsCancellation(t *testing.T) {
+	e := newEnv(t)
+	e.write("a.txt", "text")
+	ctx, cancel := context.WithCancel(context.Background())
+	e.ix.Embedder = cancelEmbedder{cancel}
+	_, err := e.ix.IndexRoot(ctx, e.root)
+	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrEmbedder) {
+		t.Fatalf("got %v, want context.Canceled (not ErrEmbedder)", err)
+	}
+}
+
+type cancelEmbedder struct{ cancel context.CancelFunc }
+
+func (c cancelEmbedder) EmbedPassages(ctx context.Context, _ string, _ []string) ([]embed.Vector, error) {
+	c.cancel()
+	return nil, fmt.Errorf("embed: request: %w", ctx.Err())
+}

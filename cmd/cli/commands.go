@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sanskarmishra479/findly/internal/appfs"
 	"github.com/sanskarmishra479/findly/internal/index"
 	"github.com/sanskarmishra479/findly/internal/safefs"
 	"github.com/sanskarmishra479/findly/internal/search"
@@ -250,4 +251,36 @@ func formatCounts(m map[string]int) string {
 		return "none"
 	}
 	return strings.Join(parts, ", ")
+}
+
+// cli reset: delete the index (database and thumbnails) so it can be rebuilt (plan I-7,
+// "rebuild index"). Only files inside the app data folder are touched.
+func runReset(args []string) error {
+	fs := flag.NewFlagSet("reset", flag.ExitOnError)
+	var ef engineFlags
+	ef.register(fs)
+	fs.Parse(args)
+	dir, err := ef.dataPath()
+	if err != nil {
+		return err
+	}
+	afs, err := appfs.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer afs.Close()
+	db := filepath.Join(appfs.DirIndex, "index.db")
+	for _, p := range store.DatabaseFiles(db) {
+		if err := afs.Remove(p); err != nil {
+			return err
+		}
+	}
+	if err := afs.RemoveAll(appfs.DirThumbs); err != nil {
+		return err
+	}
+	if err := afs.MkdirAll(appfs.DirThumbs); err != nil {
+		return err
+	}
+	fmt.Println("index deleted. Add your folders again with: cli index <folder>")
+	return nil
 }

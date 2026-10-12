@@ -27,6 +27,7 @@ import (
 	"github.com/sanskarmishra479/findly/internal/chunk"
 	"github.com/sanskarmishra479/findly/internal/embed"
 	"github.com/sanskarmishra479/findly/internal/extract"
+	"github.com/sanskarmishra479/findly/internal/safefs"
 	"github.com/sanskarmishra479/findly/internal/scan"
 	"github.com/sanskarmishra479/findly/internal/store"
 )
@@ -99,7 +100,7 @@ func (ix *Indexer) IndexRoot(ctx context.Context, root store.Root) (Stats, error
 	var jobs []job
 	now := ix.now()
 	st.Scan, err = scan.Root(ctx, root.Path, scan.Options{Excludes: excludes}, func(f scan.File) error {
-		seen[strings.ToUpper(f.Path)] = true
+		seen[safefs.PathKey(f.Path)] = true
 		id, changed, err := ix.Store.UpsertFile(ctx, store.File{
 			RootID: root.ID, Path: f.Path, Name: f.Name, Ext: f.Ext, Kind: f.Kind, Size: f.Size, MTime: f.ModTime,
 		})
@@ -150,7 +151,7 @@ func (ix *Indexer) removeDeleted(ctx context.Context, rootID int64, seen map[str
 		return err
 	}
 	for _, p := range known {
-		key := strings.ToUpper(p)
+		key := safefs.PathKey(p)
 		if seen[key] || underAny(key, failed) {
 			continue
 		}
@@ -294,11 +295,12 @@ func (ix *Indexer) run(ctx context.Context, rootPath string, jobs []job, st *Sta
 
 	// Stage 2: embed and store, one file at a time.
 	var runErr error
+	crashes := 0 // consecutive files that crashed the embedding server
 	for r := range results {
 		if runErr != nil {
 			continue // draining after a fatal error so the workers can exit
 		}
-		status, err := ix.store(ctx, r, tier)
+		status, err := ix.store(ctx, r, tier, &crashes)
 		if err != nil {
 			runErr = err
 			cancel()
@@ -315,7 +317,11 @@ func (ix *Indexer) run(ctx context.Context, rootPath string, jobs []job, st *Sta
 var errOverLimit = errors.New("free version limit reached")
 
 // store handles one extracted file and returns the status it recorded.
-func (ix *Indexer) store(ctx context.Context, r extracted, tier *freeTier) (string, error) {
+// maxCrashFiles: if this many files in a row crash the embedding server, the server
+// itself is broken (not the files), so the run stops instead of failing every file.
+const maxCrashFiles = 3
+
+func (ix *Indexer) store(ctx context.Context, r extracted, tier *freeTier, crashes *int) (string, error) {
 	id := r.job.id
 	set := func(status, hash, msg string) (string, error) {
 		return status, ix.Store.SetFileResult(ctx, id, status, "", hash, msg)
@@ -351,12 +357,24 @@ func (ix *Indexer) store(ctx context.Context, r extracted, tier *freeTier) (stri
 	}
 
 	items, err := ix.items(ctx, r)
+	if errors.Is(err, embed.ErrCrashed) {
+		// Plan section 5: the server restarts automatically; try this file once more. If it
+		// crashes again, this file is the likely cause: mark it failed and continue.
+		items, err = ix.items(ctx, r)
+		if errors.Is(err, embed.ErrCrashed) {
+			if *crashes++; *crashes >= maxCrashFiles {
+				return "", err
+			}
+			return set(store.StatusFailed, "", "the embedding model crashed on this file twice")
+		}
+	}
 	if err != nil {
-		if errors.Is(err, ErrEmbedder) {
+		if errors.Is(err, ErrEmbedder) || ctx.Err() != nil {
 			return "", err
 		}
 		return set(store.StatusFailed, "", err.Error())
 	}
+	*crashes = 0
 	if err := ix.Store.ReplaceContent(ctx, id, items); err != nil {
 		return "", err
 	}
@@ -398,12 +416,17 @@ func (ix *Indexer) items(ctx context.Context, r extracted) ([]store.Item, error)
 	if len(toEmbed) > 0 {
 		vecs, err := ix.Embedder.EmbedPassages(ctx, r.job.file.Name, toEmbed)
 		if err != nil {
-			// Only an error about this input blames the file. Anything else (server down,
-			// broken output, timeout, cancel) stops the run so files are not wrongly failed.
-			if errors.Is(err, embed.ErrInput) {
-				return nil, err
+			switch {
+			case ctx.Err() != nil:
+				// Paused or quitting: report it as such, not as a broken server (which
+				// could make the app switch backends).
+				return nil, ctx.Err()
+			case errors.Is(err, embed.ErrInput):
+				return nil, err // about this input only: the file fails, the run goes on
 			}
-			return nil, fmt.Errorf("%w: %v", ErrEmbedder, err)
+			// Anything else (server down, crashed, broken output, timeout) stops the run so
+			// files are not wrongly marked failed. %w twice keeps ErrCrashed visible.
+			return nil, fmt.Errorf("%w: %w", ErrEmbedder, err)
 		}
 		if len(vecs) != len(toEmbed) {
 			return nil, fmt.Errorf("%w: got %d vectors for %d passages", ErrEmbedder, len(vecs), len(toEmbed))

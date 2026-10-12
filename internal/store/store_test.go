@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -674,5 +675,60 @@ func TestFolderFilterNonASCII(t *testing.T) {
 	}
 	if hits, _ := s.KeywordSearch(ctx, `"quarterly"`, Filter{Folder: `C:\Users\José\Док`}, 50, true); len(hits) != 0 {
 		t.Error("partial folder name matched")
+	}
+}
+
+// Full review #5: names NTFS keeps apart (σ/ς, µ/μ) must get separate rows.
+func TestDistinctNTFSNamesGetSeparateRows(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	root, _ := s.AddRoot(ctx, `C:\Docs`)
+	a := addFile(t, s, root.ID, `C:\Docs\σ.txt`)
+	b := addFile(t, s, root.ID, `C:\Docs\ς.txt`)
+	if a == b {
+		t.Fatal("σ.txt and ς.txt share one index row")
+	}
+	if ok, _, _ := s.DeleteFile(ctx, `C:\Docs\σ.txt`); !ok {
+		t.Fatal("delete failed")
+	}
+	if _, ok, _ := s.FileByPath(ctx, `C:\Docs\ς.txt`); !ok {
+		t.Fatal("deleting σ.txt removed ς.txt")
+	}
+}
+
+// Full review #6 (I-7): a damaged index is detected at open with ErrCorrupt.
+func TestCorruptDatabaseIsDetected(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "index.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, _ := s.AddRoot(ctx, `C:\Docs`)
+	for i := range 300 {
+		id := addFile(t, s, root.ID, fmt.Sprintf(`C:\Docs\%d.txt`, i))
+		s.ReplaceContent(ctx, id, []Item{{Kind: ItemPassage, Text: strings.Repeat("words ", 200), Vector: vec(int8(i % 100))}})
+	}
+	s.Close()
+
+	// Overwrite a stretch in the middle of the file with garbage.
+	b, _ := os.ReadFile(path)
+	for i := len(b) / 2; i < len(b)/2+16384 && i < len(b); i++ {
+		b[i] = 0xA5
+	}
+	os.WriteFile(path, b, 0o644)
+	if _, err := Open(path); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("damaged index: got %v, want ErrCorrupt", err)
+	}
+
+	// A file that is not a database at all.
+	junk := filepath.Join(dir, "junk.db")
+	os.WriteFile(junk, []byte(strings.Repeat("not sqlite ", 1000)), 0o644)
+	if _, err := Open(junk); !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("junk file: got %v, want ErrCorrupt", err)
+	}
+	if got := DatabaseFiles(path); len(got) != 3 || got[1] != path+"-wal" {
+		t.Fatalf("DatabaseFiles = %v", got)
 	}
 }

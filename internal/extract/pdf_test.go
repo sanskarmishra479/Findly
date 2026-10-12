@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/klippa-app/go-pdfium"
 	pdfiumerr "github.com/klippa-app/go-pdfium/errors"
 	"github.com/klippa-app/go-pdfium/requests"
 )
@@ -225,5 +227,60 @@ func TestClosePDFTwiceAndReuse(t *testing.T) {
 	}
 	if _, err := File(write(t, "reuse.pdf", makePDF("engine restarts after close"))); err != nil {
 		t.Fatalf("after ClosePDF: %v", err)
+	}
+}
+
+// Full review #2: a negative text budget is an error, not a panic.
+func TestPDFNegativeBudget(t *testing.T) {
+	p := write(t, "neg.pdf", makePDF("some page text that is long enough"))
+	if _, _, err := PDFPages(p, 0, 1, -5); err == nil {
+		t.Fatal("expected error")
+	}
+}
+
+// Full review #2: a panic during extraction becomes an error; the app keeps running and
+// the engine still works afterwards.
+func TestPDFPanicIsRecovered(t *testing.T) {
+	old := pdfTextFn
+	pdfTextFn = func(pdfium.Pdfium, []byte, int, int, int) (Doc, int, error) { panic("boom") }
+	_, _, err := PDFPages(write(t, "p.pdf", makePDF("x page text here ok")), 0, 1, MaxOutputText)
+	pdfTextFn = old
+	if !errors.Is(err, ErrPDFCrash) {
+		t.Fatalf("got %v, want ErrPDFCrash", err)
+	}
+	if _, err := File(write(t, "after.pdf", makePDF("engine still works after a panic"))); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Full review #3: a PDF's bytes are read only after an engine is free, so at most
+// pdfEngines PDFs are in memory at once, however many workers are waiting.
+func TestPDFReadAfterEngineIsFree(t *testing.T) {
+	var mu sync.Mutex
+	inMemory, peak := 0, 0
+	oldRead, oldText := readPDF, pdfTextFn
+	readPDF = func(p string) ([]byte, error) {
+		mu.Lock()
+		inMemory++
+		peak = max(peak, inMemory)
+		mu.Unlock()
+		return oldRead(p)
+	}
+	pdfTextFn = func(inst pdfium.Pdfium, data []byte, from, to, maxText int) (Doc, int, error) {
+		defer func() { mu.Lock(); inMemory--; mu.Unlock() }()
+		time.Sleep(30 * time.Millisecond)
+		return oldText(inst, data, from, to, maxText)
+	}
+	defer func() { readPDF, pdfTextFn = oldRead, oldText }()
+
+	p := write(t, "c.pdf", makePDF("concurrent memory test page"))
+	var wg sync.WaitGroup
+	for range 6 {
+		wg.Add(1)
+		go func() { defer wg.Done(); File(p) }()
+	}
+	wg.Wait()
+	if peak > pdfEngines {
+		t.Fatalf("%d PDFs in memory at once, want at most %d", peak, pdfEngines)
 	}
 }

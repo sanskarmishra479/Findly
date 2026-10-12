@@ -26,6 +26,7 @@ import (
 // Options for Start.
 type Options struct {
 	Env         []string  // the complete environment; SystemRoot is added automatically
+	Dir         string    // working folder; empty = the program's own folder
 	LowPriority bool      // BELOW_NORMAL_PRIORITY_CLASS (plan 5: during indexing)
 	Output      io.Writer // stdout+stderr of the child; nil discards
 }
@@ -52,6 +53,9 @@ func Start(exe string, args []string, opts Options) (*Proc, error) {
 
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = filepath.Dir(exe)
+	if opts.Dir != "" {
+		cmd.Dir = opts.Dir
+	}
 	cmd.Env = append([]string{"SystemRoot=" + os.Getenv("SystemRoot")}, opts.Env...)
 	out := opts.Output
 	if out == nil {

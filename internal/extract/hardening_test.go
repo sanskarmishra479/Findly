@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"runtime"
 	"strings"
 	"testing"
@@ -184,4 +185,34 @@ func TestRTFLargePictureIsCheap(t *testing.T) {
 			t.Errorf("got %q", got)
 		}
 	})
+}
+
+// Full review #1: the entry count stored in the end-of-directory record is forged to look
+// small. The real headers must be counted instead.
+func TestZipForgedEntryCount(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	zw.Create("word/document.xml")
+	for i := range maxZipEntries + 50 {
+		zw.Create(fmt.Sprintf("e%d", i))
+	}
+	zw.Close()
+	b := buf.Bytes()
+	eocd := bytes.LastIndex(b, []byte{0x50, 0x4b, 0x05, 0x06})
+	if eocd < 0 {
+		t.Fatal("no EOCD")
+	}
+	// Claim only 5 entries (both the per-disk and total counts).
+	b[eocd+8], b[eocd+9], b[eocd+10], b[eocd+11] = 5, 0, 5, 0
+	if _, err := File(write(t, "forged.docx", b)); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("got %v, want ErrTooLarge", err)
+	}
+	// A normal document is still counted correctly.
+	ok := zipFile(t, "ok.docx", map[string]string{"word/document.xml": "<w:document/>", "a": "", "b": ""})
+	f, _ := os.Open(ok)
+	defer f.Close()
+	st, _ := f.Stat()
+	if n, err := zipEntryCount(f, st.Size()); err != nil || n != 3 {
+		t.Fatalf("count = %d, %v; want 3", n, err)
+	}
 }

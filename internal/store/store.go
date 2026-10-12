@@ -18,6 +18,7 @@ import (
 	"github.com/ncruces/go-sqlite3"
 	"github.com/ncruces/go-sqlite3/driver"
 	"github.com/ncruces/go-sqlite3/ext/fts5"
+	"github.com/sanskarmishra479/findly/internal/safefs"
 )
 
 // VectorDim is the stored vector size (EmbeddingGemma 2 truncated to 256, plan section 7).
@@ -52,9 +53,9 @@ type Store struct {
 	db *sql.DB
 }
 
-// pathKey is how paths are compared: Windows ignores case for all letters (not just
-// A–Z, which is all SQLite's NOCASE handles).
-func pathKey(p string) string { return strings.ToUpper(filepath.Clean(p)) }
+// pathKey is how paths are compared: Windows' own case rules (see safefs.PathKey); SQLite's
+// NOCASE only handles A–Z, and Go's ToUpper merges names NTFS keeps apart.
+func pathKey(p string) string { return safefs.PathKey(p) }
 
 // Open opens (or creates) the index database at path and brings its schema up to date.
 // path must be an absolute local path; get it from appfs.FS.Path("index/index.db").
@@ -93,6 +94,9 @@ func Open(path string) (*Store, error) {
 	}
 	if err != nil {
 		db.Close()
+		if IsCorrupt(err) {
+			return nil, fmt.Errorf("%w: %v", ErrCorrupt, err)
+		}
 		return nil, err
 	}
 	return s, nil
@@ -102,7 +106,20 @@ func (s *Store) setup(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `PRAGMA journal_mode = WAL`); err != nil {
 		return err
 	}
-	return s.migrate(ctx)
+	if err := s.migrate(ctx); err != nil {
+		return err
+	}
+	// A damaged index must be noticed at once (plan I-7), not show up later as
+	// half-working search. quick_check reads every page but skips the slow index
+	// cross-checks; it takes about a second per few hundred MB.
+	var result string
+	if err := s.db.QueryRowContext(ctx, `PRAGMA quick_check(1)`).Scan(&result); err != nil {
+		return err
+	}
+	if result != "ok" {
+		return fmt.Errorf("%w: %s", ErrCorrupt, result)
+	}
+	return nil
 }
 
 func isBusy(err error) bool {
@@ -952,4 +969,21 @@ func (s *Store) Count(ctx context.Context) (Counts, error) {
 // Empty reports whether the filter lets everything through.
 func (fl Filter) Empty() bool {
 	return len(fl.Kinds) == 0 && fl.Folder == "" && fl.After == 0 && fl.Before == 0
+}
+
+// ErrCorrupt means the index database is damaged. User files are never affected (I-7):
+// the fix is to delete the index (DatabaseFiles) and index again.
+var ErrCorrupt = errors.New("store: the index is damaged and must be rebuilt")
+
+// IsCorrupt reports whether err means a damaged or non-database index file.
+func IsCorrupt(err error) bool {
+	return errors.Is(err, ErrCorrupt) ||
+		errors.Is(err, sqlite3.CORRUPT) || errors.Is(err, sqlite3.NOTADB) ||
+		strings.Contains(err.Error(), "malformed") || strings.Contains(err.Error(), "not a database")
+}
+
+// DatabaseFiles lists the files that make up the index database at path (the database
+// and its WAL/shared-memory files), for deleting a damaged index.
+func DatabaseFiles(path string) []string {
+	return []string{path, path + "-wal", path + "-shm"}
 }

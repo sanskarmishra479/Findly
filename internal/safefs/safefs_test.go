@@ -444,3 +444,26 @@ func TestFileTimeClamps(t *testing.T) {
 		t.Errorf("round trip = %v, want %v", got, want)
 	}
 }
+
+// Full review #5: PathKey must keep apart names that NTFS keeps apart, and join names
+// NTFS treats as the same.
+func TestPathKeyFollowsNTFS(t *testing.T) {
+	dir := t.TempDir()
+	for _, pair := range [][2]string{{"σ.txt", "ς.txt"}, {"µ.txt", "μ.txt"}, {"s.txt", "ſ.txt"}, {"i.txt", "ı.txt"}} {
+		a, b := filepath.Join(dir, pair[0]), filepath.Join(dir, pair[1])
+		os.WriteFile(a, []byte("a"), 0o644)
+		os.WriteFile(b, []byte("b"), 0o644)
+		ca, _ := os.ReadFile(a)
+		if string(ca) != "a" {
+			continue // this volume treats them as one file; then the keys may be equal
+		}
+		if PathKey(a) == PathKey(b) {
+			t.Errorf("%s and %s are different files but got the same key", pair[0], pair[1])
+		}
+	}
+	for _, pair := range [][2]string{{`C:\Docs\Report.TXT`, `c:\docs\report.txt`}, {`C:\Ärger`, `c:\ärger`}, {`C:\a\`, `C:\A`}} {
+		if PathKey(pair[0]) != PathKey(pair[1]) {
+			t.Errorf("%q and %q should share a key", pair[0], pair[1])
+		}
+	}
+}

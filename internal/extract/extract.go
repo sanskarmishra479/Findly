@@ -138,6 +138,9 @@ func tidy(s string) string {
 
 // cutUTF8 shortens s to at most n bytes without splitting a character.
 func cutUTF8(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
 	if n >= len(s) {
 		return s
 	}
