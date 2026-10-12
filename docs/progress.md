@@ -24,7 +24,7 @@
 - [x] T6 `index` (pipeline, priorities, dedupe, deletions, free tier)
 - [x] T7 `search` (keyword + semantic + RRF + exact boost, filters)
 - [x] T8 CLI index/search/stats/remove (+ `check`, `reset`; `-kind`, `-folder`, `-after`, `-before`)
-- [x] T9 evals (28-file testbed, 46 queries incl. paraphrases, multi-answer and "should find nothing"; `cli eval` with cutoff/gap sweep). Chosen cutoff 0.64 + gap 0.06 (Vulkan, 2026-10-12): Recall@5 = 1.000, MRR@10 = 0.976, results in `evals/results/`
+- [x] T9 evals (28-file testbed, 46 queries incl. paraphrases, multi-answer and "should find nothing"; `cli eval` with cutoff/gap sweep). Chosen cutoff 0.64 + gap 0.06 (Vulkan, 2026-10-12): Recall@5 = 1.000, MRR@10 = 0.976, 3 of 4 "should find nothing" queries clean ("asdfgh qwerty" still returns results); results in `evals/results/`
 - [x] T10 file-integrity test (`go test ./internal/integrity`)
 - [x] Full Phase 1 review: all High and Medium findings fixed and re-reviewed (see docs/decisions.md)
 - [x] Low findings

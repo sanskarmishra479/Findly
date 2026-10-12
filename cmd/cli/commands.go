@@ -131,12 +131,11 @@ func runSearch(args []string) error {
 		if d.val == "" {
 			continue
 		}
-		t, err := time.ParseInLocation("2006-01-02", d.val, time.Local)
-		// UnixNano only covers 1678–2262; outside that it returns nonsense.
-		if err != nil || t.Year() < 1970 || t.Year() > 2200 {
+		ns, err := dayStart(d.val, time.Local)
+		if err != nil {
 			return fmt.Errorf("-%s %q: use a date like 2025-03-31", d.name, d.val)
 		}
-		*d.dst = t.UnixNano()
+		*d.dst = ns
 	}
 	if fl.After != 0 && fl.Before != 0 && fl.Before <= fl.After {
 		return errors.New("-before must be later than -after")
@@ -351,3 +350,22 @@ func runCheck(args []string) error {
 }
 
 var validKinds = map[string]bool{"text": true, "doc": true, "pdf": true, "image": true, "audio": true, "video": true, "other": true}
+
+// dayStart returns the first moment of the day "YYYY-MM-DD" in loc, in unix nanoseconds
+// (at least 1, since 0 means "no filter" in store.Filter).
+func dayStart(day string, loc *time.Location) (int64, error) {
+	t, err := time.ParseInLocation("2006-01-02", day, loc)
+	if err != nil {
+		return 0, err
+	}
+	// UnixNano only covers 1678–2262; outside that it returns nonsense.
+	if t.Year() < 1970 || t.Year() > 2200 {
+		return 0, errors.New("year out of range")
+	}
+	// Where clocks jump at midnight (some DST zones), Go returns a time on the day
+	// before; move to the first moment that is really on the requested day.
+	for t.Format("2006-01-02") != day {
+		t = t.Add(15 * time.Minute)
+	}
+	return max(t.UnixNano(), 1), nil
+}

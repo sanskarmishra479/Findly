@@ -371,3 +371,17 @@ func TestPrivateFolderInsideAndTrailingDots(t *testing.T) {
 		}
 	}
 }
+
+// Final review: as parents, "secret" must be a word of its own.
+func TestPrivateParentsNeedWholeWord(t *testing.T) {
+	for _, p := range []string{`C:\Users\secretagent\Documents`, `D:\Biology\Secretion studies\x`, `D:\secretsauce\x`} {
+		if SecretFolder(p) {
+			t.Errorf("%s refused", p)
+		}
+	}
+	for _, p := range []string{`C:\Users\bob\MySecrets\Bank`, `D:\My Secrets\x`, `D:\SecretsArchive\x`, `D:\old_secret\x`, `D:\Top SECRET\x`} {
+		if !SecretFolder(p) {
+			t.Errorf("%s allowed", p)
+		}
+	}
+}

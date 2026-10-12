@@ -22,6 +22,9 @@ func runCompare(args []string) error {
 		return err
 	}
 
+	if len(ref) == 0 {
+		return fmt.Errorf("%s has no vectors", args[0])
+	}
 	names := make([]string, 0, len(ref))
 	for name := range ref {
 		names = append(names, name)

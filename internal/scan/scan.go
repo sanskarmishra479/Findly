@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/sanskarmishra479/findly/internal/safefs"
 	"golang.org/x/sys/windows"
@@ -360,10 +361,10 @@ var credentialDirs = map[string]bool{
 	".password-store": true, ".terraform": true,
 }
 
-// SecretFolder reports whether path is, or is inside, a credentials folder: every part
-// gets the rules a subfolder gets while scanning ("KeePass", "MySecrets"), so choosing a
-// folder inside one is refused just as a scan of its parent would skip it. (Go puts the
-// test name in temp folder paths, so tests here avoid names like "TestSecret…".)
+// SecretFolder reports whether path is, or is inside, a credentials folder. The chosen
+// folder gets the rules a subfolder gets while scanning ("KeePass", "MySecrets"); its
+// parents get them too, except that "secret" must be a word of its own there. (Go puts
+// the test name in temp folder paths, so tests here avoid names like "TestSecret…".)
 func SecretFolder(path string) bool {
 	path = filepath.Clean(path)
 	vol := filepath.VolumeName(path)
@@ -372,8 +373,49 @@ func SecretFolder(path string) bool {
 	if strings.HasPrefix(vol, `\\`) {
 		parts = append([]string{vol[strings.LastIndex(vol, `\`)+1:]}, parts...)
 	}
-	for _, part := range parts {
-		if part != "" && IsSecretFolderName(part) {
+	last := len(parts) - 1
+	for last > 0 && parts[last] == "" { // "\srv\Passwords\" has an empty last part
+		last--
+	}
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		if i == last && IsSecretFolderName(part) {
+			return true
+		}
+		// Parents: the same rules, but "secret" must be a word of its own ("My Secrets",
+		// "MySecrets"), so a user folder like "secretagent" or "Secretion studies" does not
+		// block everything below it.
+		n := secretKey(part)
+		if credentialDirs[n] || secretWords(n) || secretNameRules(n) || secretWordIn(part) {
+			return true
+		}
+	}
+	return false
+}
+
+// secretWordIn reports whether name contains "secret" or "secrets" as a word: at the
+// start or after a non-letter or a lower-case letter followed by "S" (camel case), and
+// ending at a non-letter, the end, or an upper-case letter.
+func secretWordIn(name string) bool {
+	rs := []rune(name)
+	lower := []rune(strings.ToLower(name))
+	if len(lower) != len(rs) {
+		return containsSecret(strings.ToLower(name)) // unusual case mapping: stay strict
+	}
+	w := []rune("secret")
+	for i := 0; i+len(w) <= len(lower); i++ {
+		if string(lower[i:i+len(w)]) != "secret" {
+			continue
+		}
+		startOK := i == 0 || !unicode.IsLetter(rs[i-1]) || (unicode.IsLower(rs[i-1]) && unicode.IsUpper(rs[i]))
+		j := i + len(w)
+		if j < len(lower) && lower[j] == 's' && (j+1 == len(rs) || !unicode.IsLower(rs[j+1])) {
+			j++
+		}
+		endOK := j == len(rs) || !unicode.IsLetter(rs[j]) || unicode.IsUpper(rs[j])
+		if startOK && endOK {
 			return true
 		}
 	}

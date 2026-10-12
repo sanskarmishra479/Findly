@@ -14,12 +14,16 @@ New-Item -ItemType Directory -Force $Root | Out-Null
 foreach ($b in $Builds) {
     $zip    = Join-Path $Root $b.File
     $dest   = Join-Path $Root $b.Variant
+    $old    = "$dest.old"
     $marker = Join-Path $dest '.verified'
     $url    = "https://github.com/ggml-org/llama.cpp/releases/download/$Tag/$($b.File)"
 
+    # A previous swap may have left the old install behind (its exe was still running).
+    if (Test-Path $old) { Remove-Item $old -Recurse -Force -ErrorAction SilentlyContinue }
+
     # The marker holds the hash of the zip the folder was extracted from. It is written
     # last, so an interrupted extract (or an older build) is never mistaken for a good one.
-    if ((Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq $b.Sha256)) {
+    if ((Test-Path $marker) -and ("$(Get-Content $marker -Raw)".Trim() -eq $b.Sha256)) {
         Write-Host "[$($b.Variant)] already present, skipping"
         continue
     }
@@ -32,14 +36,17 @@ foreach ($b in $Builds) {
         Remove-Item $zip -Force
         throw "[$($b.Variant)] SHA-256 mismatch: got $hash, want $($b.Sha256)"
     }
-    # Extract next to the target, then swap it in, so $dest is either the old install or
-    # a complete new one.
+    # Extract next to the target, then swap folders by renaming. Renaming works even while
+    # llama-server.exe inside is running (deleting does not), so $dest is always either
+    # the old install or a complete new one.
     $partial = "$dest.partial"
     if (Test-Path $partial) { Remove-Item $partial -Recurse -Force }
     Expand-Archive -Path $zip -DestinationPath $partial
     Set-Content -Path (Join-Path $partial '.verified') -Value $b.Sha256 -Encoding ascii
-    if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
-    Move-Item $partial $dest
+    if (Test-Path $old) { throw "[$($b.Variant)] $old is still in use; stop llama-server and run again" }
+    if (Test-Path $dest) { Rename-Item $dest (Split-Path $old -Leaf) }
+    Rename-Item $partial (Split-Path $dest -Leaf)
+    Remove-Item $old -Recurse -Force -ErrorAction SilentlyContinue # retried on the next run
     Remove-Item $zip -Force
     Write-Host "[$($b.Variant)] ok -> $dest"
 }

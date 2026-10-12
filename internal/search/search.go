@@ -262,7 +262,7 @@ func containsWords(hay, phrase string) bool {
 		start, end := i+j, i+j+len(phrase)
 		before, _ := utf8.DecodeLastRuneInString(hay[:start])
 		after, _ := utf8.DecodeRuneInString(hay[end:])
-		if edgeOK(before, first) && edgeOK(after, last) {
+		if edgeOK(before, first, false) && edgeOK(after, last, true) {
 			return true
 		}
 		_, size := utf8.DecodeRuneInString(hay[start:])
@@ -270,19 +270,28 @@ func containsWords(hay, phrase string) bool {
 	}
 }
 
-// edgeOK reports whether a phrase may end at the boundary between its own letter in and
-// the neighboring letter out.
-func edgeOK(out, in rune) bool {
-	return out == ' ' || out == utf8.RuneError || spaceless(out) || spaceless(in)
+// edgeOK reports whether a phrase may start (end false) or end (end true) at the
+// boundary between its own letter in and the neighboring letter out.
+func edgeOK(out, in rune, end bool) bool {
+	if out == ' ' || out == utf8.RuneError || spaceless(out) || spaceless(in) {
+		return true
+	}
+	// Korean writes spaces between words, but particles attach to the end of a word
+	// ("서울에서" is "in Seoul"): a phrase may be followed by more Hangul, but must not
+	// start in the middle of a Hangul word ("울" is not in "서울").
+	hin, hout := unicode.Is(unicode.Hangul, in), unicode.Is(unicode.Hangul, out)
+	if end {
+		return hin || hout
+	}
+	return hin != hout
 }
 
 // spaceless reports whether r belongs to a script written without spaces between words.
 // The Japanese long-vowel marks ー and ｰ are "Common" script but only appear in kana
-// words ("コーヒー"). Korean uses spaces, but particles attach to words ("서울에서" is
-// "in Seoul"), so a Korean word can also sit inside a longer run of letters.
+// words ("コーヒー").
 func spaceless(r rune) bool {
 	return r == 'ー' || r == 'ｰ' || unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana,
-		unicode.Thai, unicode.Lao, unicode.Khmer, unicode.Myanmar, unicode.Hangul)
+		unicode.Thai, unicode.Lao, unicode.Khmer, unicode.Myanmar)
 }
 
 // normalize collapses punctuation to spaces so "INV-2024-001" matches "inv 2024 001".

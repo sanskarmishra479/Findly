@@ -230,3 +230,10 @@ Three parallel review agents covered the whole phase; 8 High findings, all confi
 - **`EnsureModel`:** reads first without a lock and takes the write transaction only on first use.
 - **Cleanup:** removed the unused `VectorCache.Len`.
 - Accepted (scope): password managers with other names ("Vault", "Enpass") and non-English words ("Passwort", "Contraseñas") are not detected. `\?\C:\…` roots get a "not available" error instead of a clearer one.
+
+## Phase 1 review — final review fixes (2026-10-12)
+- **fetch-llama.ps1:** the folders are swapped by renaming (`cpu` becomes `cpu.old`, then `cpu.partial` becomes `cpu`). Renaming works while llama-server.exe is running; deleting doesn't, and a failed delete used to leave a broken install. The leftover `.old` is removed on the next run. An empty `.verified` marker just triggers a reinstall. Tested with a fake zip and a locked exe.
+- **Korean phrases:** a phrase may be followed by more Hangul (particles) but must not start inside a Hangul word, so `"울"` no longer matches "서울에서".
+- **Parent folders:** "secret" must be a word of its own (`My Secrets`, `MySecrets`, `old_secret`), so `C:\Users\secretagent` and "Secretion studies" don't block everything below them. The chosen folder itself keeps the substring rule.
+- **Date filters:** `dayStart` moves a missing local midnight (DST zones that jump at 00:00) to the first real moment of the day. 1970-01-01 UTC no longer turns into "no filter".
+- **`cli compare`:** real cosine (divides by the norms), and a reference with no vectors is refused.

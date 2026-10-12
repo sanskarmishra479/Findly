@@ -506,3 +506,21 @@ func TestFusePhraseLongVowelAndKorean(t *testing.T) {
 		}
 	}
 }
+
+// Final review: a Korean phrase may be followed by a particle but must not start inside
+// a word.
+func TestFuseKoreanPhraseStart(t *testing.T) {
+	mk := func(text string) []Result {
+		return []Result{{File: store.File{ID: 1, Name: "x.txt"}, text: text, Meaning: true}}
+	}
+	for phrase, text := range map[string]string{"울": "서울에서", "산": "부산 여행", "수학": "대수학"} {
+		if out := Fuse(Parse(`"`+phrase+`"`), nil, mk(text)); len(out) != 0 {
+			t.Errorf("%q matched inside %q", phrase, text)
+		}
+	}
+	for phrase, text := range map[string]string{"서울": "서울에서 만나요", "report": "report에서", "부산": "a부산"} {
+		if out := Fuse(Parse(`"`+phrase+`"`), nil, mk(text)); len(out) != 1 {
+			t.Errorf("%q not found in %q", phrase, text)
+		}
+	}
+}
