@@ -94,10 +94,7 @@ func IsSecretName(name string) bool {
 		// Password-manager exports: bitwarden_export_20250101.json, lastpass_export.csv, …
 		strings.Contains(n, "bitwarden"), strings.Contains(n, "lastpass"), strings.Contains(n, "1password"),
 		strings.Contains(n, "keepass"), strings.Contains(n, "dashlane"), strings.Contains(n, "nordpass"),
-		// 2FA recovery codes and crypto wallet seed phrases.
-		strings.Contains(n, "recovery-codes"), strings.Contains(n, "recovery_codes"),
-		strings.Contains(n, "backup-codes"), strings.Contains(n, "backup_codes"),
-		strings.Contains(n, "mnemonic"), strings.Contains(n, "seed phrase"), strings.Contains(n, "seed-phrase"),
+		codesOrSeed(n),
 		containsSecret(n):
 		return true
 	}
@@ -306,6 +303,25 @@ func (s *scanner) excluded(path string) bool {
 		// "C:\privateer". A drive-root key such as `D:\` already ends in a separator.
 		if k == ex || strings.HasPrefix(k, strings.TrimSuffix(ex, `\`)+`\`) {
 			return true
+		}
+	}
+	return false
+}
+
+// codesOrSeed matches 2FA recovery/backup-code files and crypto wallet seed phrases, with
+// spaces, "-" or "_" between the words. "mnemonic" alone is NOT enough: "Mnemonics for
+// Biology.pdf" is study material; it must come with seed/wallet/phrase/crypto words.
+func codesOrSeed(n string) bool {
+	w := strings.NewReplacer("_", " ", "-", " ", ".", " ").Replace(n)
+	switch {
+	case strings.Contains(w, "recovery code"), strings.Contains(w, "backup code"),
+		strings.Contains(w, "seed phrase"), strings.Contains(w, "seedphrase"):
+		return true
+	case strings.Contains(w, "mnemonic"):
+		for _, k := range []string{"seed", "wallet", "phrase", "crypto", "bitcoin", "ethereum"} {
+			if strings.Contains(w, k) {
+				return true
+			}
 		}
 	}
 	return false

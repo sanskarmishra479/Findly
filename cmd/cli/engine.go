@@ -54,10 +54,7 @@ func openEngine(e engineFlags) (*engine, error) {
 	st, err := store.Open(dbPath)
 	if err != nil {
 		afs.Close()
-		if store.IsCorrupt(err) {
-			return nil, fmt.Errorf("%w (your files are not affected; run \"cli reset\" to delete the damaged index, then index your folders again)", err)
-		}
-		return nil, err
+		return nil, err // main prints the "cli reset" hint for damaged indexes
 	}
 	return &engine{fs: afs, store: st}, nil
 }

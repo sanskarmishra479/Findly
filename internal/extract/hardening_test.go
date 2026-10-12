@@ -238,3 +238,39 @@ func TestZipForgedDirectoryOffset(t *testing.T) {
 		}
 	}
 }
+
+// Verification follow-up: a small zip with a ZIP64 end record + locator (written by some
+// tools even for small files) must still be accepted.
+func TestZipWithZip64RecordAccepted(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, _ := zw.Create("word/document.xml")
+	w.Write([]byte(`<w:document><w:body><w:p><w:r><w:t>zip64 hello</w:t></w:r></w:p></w:body></w:document>`))
+	zw.Close()
+	b := buf.Bytes()
+	eocd := bytes.LastIndex(b, []byte{0x50, 0x4b, 0x05, 0x06})
+	dirSize := binary.LittleEndian.Uint32(b[eocd+12:])
+	dirStart := binary.LittleEndian.Uint32(b[eocd+16:])
+	// Insert a ZIP64 end record (56 bytes) and locator (20 bytes) before the classic one.
+	rec := make([]byte, 56)
+	binary.LittleEndian.PutUint32(rec, 0x06064b50)
+	binary.LittleEndian.PutUint64(rec[4:], 44)
+	binary.LittleEndian.PutUint16(rec[12:], 45)
+	binary.LittleEndian.PutUint16(rec[14:], 45)
+	binary.LittleEndian.PutUint64(rec[24:], 1)
+	binary.LittleEndian.PutUint64(rec[32:], 1)
+	binary.LittleEndian.PutUint64(rec[40:], uint64(dirSize))
+	binary.LittleEndian.PutUint64(rec[48:], uint64(dirStart))
+	loc := make([]byte, 20)
+	binary.LittleEndian.PutUint32(loc, 0x07064b50)
+	binary.LittleEndian.PutUint64(loc[8:], uint64(eocd))
+	binary.LittleEndian.PutUint32(loc[16:], 1)
+	out := append(append(append(append([]byte{}, b[:eocd]...), rec...), loc...), b[eocd:]...)
+	if _, err := zip.NewReader(bytes.NewReader(out), int64(len(out))); err != nil {
+		t.Skipf("Go's reader rejects this layout too: %v", err)
+	}
+	d, err := File(write(t, "z64.docx", out))
+	if err != nil || !strings.Contains(d.Text(), "zip64 hello") {
+		t.Fatalf("got %q, %v", d.Text(), err)
+	}
+}

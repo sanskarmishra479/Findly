@@ -287,3 +287,18 @@ func TestScanSkipsPasswordManagerExports(t *testing.T) {
 	got, _ := found(t, root, Options{})
 	equal(t, got, "ok.txt")
 }
+
+// Verification follow-up: study notes about mnemonics are not secrets; codes with spaces are.
+func TestCodesAndSeedNames(t *testing.T) {
+	for _, n := range []string{"Backup Codes.txt", "recovery codes.txt", "github-recovery-codes.txt",
+		"wallet mnemonic.txt", "seed_phrase.txt", "Bitcoin mnemonic backup.txt"} {
+		if !IsSecretName(n) {
+			t.Errorf("%q should be secret", n)
+		}
+	}
+	for _, n := range []string{"Mnemonics for Biology.pdf", "Medical_Mnemonics.pdf", "Mnemonics", "seed catalog.pdf"} {
+		if IsSecretName(n) {
+			t.Errorf("%q should not be secret", n)
+		}
+	}
+}

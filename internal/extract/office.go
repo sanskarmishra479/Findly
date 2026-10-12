@@ -82,8 +82,6 @@ func zipEntryCount(r io.ReaderAt, size int64) (int, error) {
 	const (
 		eocdLen, maxComment = 22, 65535
 		eocdSig             = 0x06054b50
-		headerSig           = 0x02014b50
-		headerLen           = 46
 	)
 	n := min(size, eocdLen+maxComment)
 	buf := make([]byte, n)
@@ -104,20 +102,35 @@ func zipEntryCount(r io.ReaderAt, size int64) (int, error) {
 		binary.LittleEndian.Uint32(buf[eocd+16:]) == 0xFFFFFFFF {
 		return 0, fmt.Errorf("%w: ZIP64 archives are not supported", ErrTooLarge)
 	}
-	// Go's reader does not simply trust the stored directory offset: when it does not
-	// point at a header, it reads from (end record − directory size) instead. So the
-	// stored offset and the size must agree exactly, or a forged offset could make us
-	// count nothing while Go loads millions of entries. Documents never have data in
-	// front of the zip (unlike self-extracting archives), so a mismatch is refused.
+	// Go's reader does not simply trust the stored directory offset: it first tries
+	// (end record − directory size) and falls back to the stored offset. Rather than
+	// predicting which one it will use (layouts with ZIP64 records or forged offsets
+	// differ), count the headers at BOTH places and use the larger count.
 	dirSize := int64(binary.LittleEndian.Uint32(buf[eocd+12:]))
 	dirStart := int64(binary.LittleEndian.Uint32(buf[eocd+16:]))
 	eocdPos := size - n + int64(eocd)
-	if dirSize == 0xFFFFFFFF || dirStart+dirSize != eocdPos {
-		return 0, errors.New("extract: not a valid document (zip directory position does not match its size)")
+	if dirSize == 0xFFFFFFFF {
+		return 0, fmt.Errorf("%w: ZIP64 archives are not supported", ErrTooLarge)
 	}
+	count := 0
+	for _, start := range []int64{dirStart, eocdPos - dirSize} {
+		if start < 0 || start >= size {
+			continue
+		}
+		c, err := countHeaders(r, start, size)
+		if err != nil {
+			return c, err
+		}
+		count = max(count, c)
+	}
+	return count, nil
+}
 
-	// Walk the headers: 46 fixed bytes, then name, extra field and comment.
-	br := bufio.NewReaderSize(io.NewSectionReader(r, dirStart, size-dirStart), 64<<10)
+// countHeaders walks central-directory headers from start (46 fixed bytes, then name,
+// extra field and comment) and stops at the first non-header or beyond maxZipEntries.
+func countHeaders(r io.ReaderAt, start, size int64) (int, error) {
+	const headerSig, headerLen = 0x02014b50, 46
+	br := bufio.NewReaderSize(io.NewSectionReader(r, start, size-start), 64<<10)
 	head := make([]byte, headerLen)
 	count := 0
 	for {

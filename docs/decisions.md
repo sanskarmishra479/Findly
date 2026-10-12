@@ -182,3 +182,9 @@ Three parallel review agents covered the whole phase; 8 High findings, all confi
   - `PathKey` everywhere paths are compared (index failed-folder guard, `cli remove`, `safefs` final-path check).
   - More secret names: `.p8`, `.keychain-db`, `Login Data`, `.vault-token`, `rclone.conf`, `.s3cfg`, recovery/backup codes, mnemonic / seed-phrase files. `cli spike` removes its temporary GPU folder.
   - Dev databases created before this change used `ToUpper` path keys: run `cli reset` once (no release yet).
+- **2026-10-12 — verification of round 2, follow-ups:** all round-2 fixes verified by running code (zip offsets, crash restarts, `Verify`: Open 11 ms vs Verify 8.2 s on a 210 MB index, filtered scan 3.8–5.5 ms at 100k, PathKey everywhere). Further fixes:
+  - Zip: instead of requiring offset + size = end record (which refused valid small files that carry a ZIP64 end record/locator), the entry count is now taken at **both** places Go's reader may read the directory from (stored offset, and end − size), and the larger count is used. No stored position is trusted.
+  - Crash streak: input crashes still don't use the 3-restart budget, but **5 crashes in a row with no successful request** mean the server itself is broken; it then stays stopped (checked before any restart path). Tested with the fake server.
+  - Secrets: `mnemonic` only counts together with seed/wallet/phrase/crypto words ("Mnemonics for Biology.pdf" was skipped); recovery/backup-code names match with spaces, `-` or `_`.
+  - `cli`: the damaged-index hint is printed once.
+  - Accepted (low impact): when one request's input crashes the server, a concurrent request (e.g. a search during indexing) can also get `ErrCrashed`; indexing uses one embed worker, and a search just retries.

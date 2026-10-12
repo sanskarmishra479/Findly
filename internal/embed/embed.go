@@ -51,6 +51,9 @@ const (
 	maxHalvings   = 3        // a too-long passage is cut in half at most this often
 	startTimeout  = 3 * time.Minute
 	launchTries   = 3 // new port per try if another program took ours
+	// maxInputCrashes: crashes during requests in a row (no success between) before the
+	// server is considered broken rather than the inputs.
+	maxInputCrashes = 5
 )
 
 // Config says where the server and model files are. All paths must be absolute.
@@ -93,13 +96,14 @@ type Server struct {
 	life   context.Context // cancelled by Close; startup uses it, never a caller's ctx
 	stop   context.CancelFunc
 
-	mu         sync.Mutex
-	proc       *sidecar.Proc
-	base       string // http://127.0.0.1:port
-	key        string
-	log        *sidecar.Tail
-	restarts   int  // consecutive crashes; reset by a successful request
-	inputCrash bool // the last exit happened while handling a request (see endpoint)
+	mu          sync.Mutex
+	proc        *sidecar.Proc
+	base        string // http://127.0.0.1:port
+	key         string
+	log         *sidecar.Tail
+	restarts    int  // consecutive crashes; reset by a successful request
+	inputCrash  bool // the last exit happened while handling a request (see endpoint)
+	crashStreak int  // input crashes in a row; reset by a successful request
 
 	cacheMu sync.Mutex
 	cache   map[string]*list.Element
@@ -293,8 +297,16 @@ func (s *Server) endpoint() (base, key string, proc *sidecar.Proc, err error) {
 		// toward the limit: the indexer already gives up on such files, and counting them
 		// left the server dead for good after two bad files. The limit is for a server
 		// that dies on its own.
+		//
+		// …but a server that crashes on EVERY request (broken GPU driver) must not be
+		// restarted forever: after maxInputCrashes in a row without any success, it stays
+		// stopped (checked first, so no other path restarts it).
+		if s.crashStreak >= maxInputCrashes {
+			return "", "", nil, fmt.Errorf("%w: crashed on %d requests in a row", ErrServer, s.crashStreak)
+		}
 		if s.inputCrash {
 			s.inputCrash = false
+			s.crashStreak++
 		} else {
 			if s.restarts >= maxRestarts {
 				return "", "", nil, fmt.Errorf("%w: crashed %d times in a row", ErrServer, s.restarts)
@@ -311,6 +323,7 @@ func (s *Server) endpoint() (base, key string, proc *sidecar.Proc, err error) {
 func (s *Server) succeeded() {
 	s.mu.Lock()
 	s.restarts = 0
+	s.crashStreak = 0
 	s.mu.Unlock()
 }
 

@@ -308,16 +308,37 @@ func TestCrashingInputsDoNotKillServer(t *testing.T) {
 	}
 	defer s.Close()
 	ctx := context.Background()
-	for i := range 6 {
-		_, err := s.EmbedPassages(ctx, "bad.txt", []string{"poison number " + strconv.Itoa(i)})
-		if !errors.Is(err, ErrCrashed) || !errors.Is(err, ErrServer) {
-			t.Fatalf("crash %d: got %v, want ErrCrashed", i, err)
+	// Rounds of crashing inputs separated by successes: never runs out of restarts.
+	for round := range 3 {
+		for i := range maxInputCrashes - 1 {
+			_, err := s.EmbedPassages(ctx, "bad.txt", []string{"poison " + strconv.Itoa(round*10+i)})
+			if !errors.Is(err, ErrCrashed) || !errors.Is(err, ErrServer) {
+				t.Fatalf("round %d crash %d: got %v, want ErrCrashed", round, i, err)
+			}
 		}
-	}
-	if _, err := s.EmbedPassages(ctx, "ok.txt", []string{"a normal passage"}); err != nil {
-		t.Fatalf("server dead after crashing inputs: %v", err)
+		if _, err := s.EmbedPassages(ctx, "ok.txt", []string{"a normal passage"}); err != nil {
+			t.Fatalf("round %d: server dead after crashing inputs: %v", round, err)
+		}
 	}
 	if _, err := s.EmbedQuery(ctx, "a search"); err != nil {
 		t.Fatalf("search fails after crashing inputs: %v", err)
+	}
+}
+
+// A server that crashes on every request is broken: after maxInputCrashes in a row it is
+// not restarted again (no endless model reloads).
+func TestAlwaysCrashingServerStops(t *testing.T) {
+	s, err := Start(context.Background(), fakeServer(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	var last error
+	for i := range maxInputCrashes + 3 {
+		_, last = s.EmbedPassages(ctx, "x", []string{"poison " + strconv.Itoa(i)})
+	}
+	if errors.Is(last, ErrCrashed) || !errors.Is(last, ErrServer) {
+		t.Fatalf("last error = %v; want a refusal (ErrServer, not another crash)", last)
 	}
 }
