@@ -222,9 +222,9 @@ func runRemove(args []string) error {
 	if err != nil {
 		return err
 	}
-	want := strings.ToUpper(filepath.Clean(abs))
+	want := safefs.PathKey(abs)
 	for _, r := range roots {
-		if strings.ToUpper(filepath.Clean(r.Path)) == want {
+		if safefs.PathKey(r.Path) == want {
 			thumbs, err := en.store.RemoveRoot(ctx, r.ID)
 			if err != nil {
 				return err
@@ -282,5 +282,25 @@ func runReset(args []string) error {
 		return err
 	}
 	fmt.Println("index deleted. Add your folders again with: cli index <folder>")
+	return nil
+}
+
+// cli check: read the whole index looking for damage (plan I-7). Slow on a big index,
+// which is why it is not done on every start.
+func runCheck(args []string) error {
+	fs := flag.NewFlagSet("check", flag.ExitOnError)
+	var ef engineFlags
+	ef.register(fs)
+	fs.Parse(args)
+	en, err := openEngine(ef)
+	if err != nil {
+		return err
+	}
+	defer en.close()
+	start := time.Now()
+	if err := en.store.Verify(context.Background()); err != nil {
+		return err
+	}
+	fmt.Printf("index is healthy (checked in %v)\n", time.Since(start).Round(time.Millisecond))
 	return nil
 }

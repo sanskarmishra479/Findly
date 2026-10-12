@@ -513,3 +513,20 @@ func (c cancelEmbedder) EmbedPassages(ctx context.Context, _ string, _ []string)
 	c.cancel()
 	return nil, fmt.Errorf("embed: request: %w", ctx.Err())
 }
+
+// High-fix review #6: an unreadable folder whose name contains a character where Go's
+// ToUpper and Windows disagree (ς, ı, µ…) still protects its files from being purged.
+func TestUnreadableFolderNonASCIIName(t *testing.T) {
+	e := newEnv(t)
+	e.write("Προσωπικά ς/inside.txt", "content in a Greek-named folder")
+	e.run()
+	locked := filepath.Join(e.dir, "Προσωπικά ς")
+	user := os.Getenv("USERNAME")
+	if out, err := exec.Command("icacls", locked, "/deny", user+":(RD)").CombinedOutput(); err != nil {
+		t.Skipf("icacls: %v %s", err, out)
+	}
+	t.Cleanup(func() { exec.Command("icacls", locked, "/remove:d", user).Run() })
+	if st := e.run(); st.Deleted != 0 {
+		t.Fatalf("purged %d files from an unreadable folder", st.Deleted)
+	}
+}

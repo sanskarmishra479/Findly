@@ -104,9 +104,16 @@ func zipEntryCount(r io.ReaderAt, size int64) (int, error) {
 		binary.LittleEndian.Uint32(buf[eocd+16:]) == 0xFFFFFFFF {
 		return 0, fmt.Errorf("%w: ZIP64 archives are not supported", ErrTooLarge)
 	}
+	// Go's reader does not simply trust the stored directory offset: when it does not
+	// point at a header, it reads from (end record − directory size) instead. So the
+	// stored offset and the size must agree exactly, or a forged offset could make us
+	// count nothing while Go loads millions of entries. Documents never have data in
+	// front of the zip (unlike self-extracting archives), so a mismatch is refused.
+	dirSize := int64(binary.LittleEndian.Uint32(buf[eocd+12:]))
 	dirStart := int64(binary.LittleEndian.Uint32(buf[eocd+16:]))
-	if dirStart >= size {
-		return 0, errors.New("extract: not a valid document (bad zip directory offset)")
+	eocdPos := size - n + int64(eocd)
+	if dirSize == 0xFFFFFFFF || dirStart+dirSize != eocdPos {
+		return 0, errors.New("extract: not a valid document (zip directory position does not match its size)")
 	}
 
 	// Walk the headers: 46 fixed bytes, then name, extra field and comment.

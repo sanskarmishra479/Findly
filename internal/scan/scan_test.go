@@ -280,7 +280,7 @@ func shortName(p string) string {
 func TestScanSkipsPasswordManagerExports(t *testing.T) {
 	root := tree(t,
 		"ok.txt",
-		"bitwarden_export_20250101.json", "lastpass_export.csv", "logins.csv", "1Password Export.1pux",
+		"bitwarden_export_20250101.json", "lastpass_export.csv", "logins.csv", "1Password Export.1pux", "github-recovery-codes.txt", "Login Data", "rclone.conf", "AuthKey_ABC.p8", "wallet seed phrase.txt",
 		"vault.kdb", "infra.tfstate", "wallet.dat", ".npmrc",
 		".docker/config.json", ".password-store/bank.gpg",
 	)

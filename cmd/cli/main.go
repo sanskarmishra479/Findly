@@ -4,6 +4,8 @@ package main
 import (
 	"fmt"
 	"os"
+
+	"github.com/sanskarmishra479/findly/internal/store"
 )
 
 func main() {
@@ -30,6 +32,8 @@ func main() {
 		err = runEval(os.Args[2:])
 	case "reset":
 		err = runReset(os.Args[2:])
+	case "check":
+		err = runCheck(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -37,6 +41,9 @@ func main() {
 
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
+		if store.IsCorrupt(err) {
+			fmt.Fprintln(os.Stderr, "The index is damaged (your files are not affected). Run \"cli reset\", then index your folders again.")
+		}
 		os.Exit(1)
 	}
 }
@@ -48,6 +55,7 @@ func usage() {
 	fmt.Fprintln(os.Stderr, "  search  \"<query>\"     search by words and meaning")
 	fmt.Fprintln(os.Stderr, "  stats                 show what is indexed")
 	fmt.Fprintln(os.Stderr, "  remove  <folder>      remove a folder and its index data")
+	fmt.Fprintln(os.Stderr, "  check                 look for damage in the index")
 	fmt.Fprintln(os.Stderr, "  reset                 delete a damaged index so it can be rebuilt")
 	fmt.Fprintln(os.Stderr, "  eval                  run evals/queries.jsonl on the eval testbed")
 	fmt.Fprintln(os.Stderr, "  spike   Phase 0: embed test text/images/audio and print similarities")

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -283,5 +284,40 @@ func TestTokensInError(t *testing.T) {
 	}
 	if n := tokensInError("something else"); n != 0 {
 		t.Fatalf("got %d", n)
+	}
+}
+
+// fakeServer builds testdata/fakeserver once per test run.
+func fakeServer(t *testing.T) Config {
+	t.Helper()
+	exe := filepath.Join(t.TempDir(), "fakeserver.exe")
+	if out, err := exec.Command("go", "build", "-o", exe, "./testdata/fakeserver").CombinedOutput(); err != nil {
+		t.Fatalf("build fake server: %v %s", err, out)
+	}
+	model := filepath.Join(t.TempDir(), "model.gguf")
+	os.WriteFile(model, nil, 0o644)
+	return Config{ServerExe: exe, Model: model, WorkDir: t.TempDir()}
+}
+
+// High-fix review #2/#3: files that crash the server must not use up the restart limit:
+// after many crashing inputs, normal requests (and searches) still work.
+func TestCrashingInputsDoNotKillServer(t *testing.T) {
+	s, err := Start(context.Background(), fakeServer(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	for i := range 6 {
+		_, err := s.EmbedPassages(ctx, "bad.txt", []string{"poison number " + strconv.Itoa(i)})
+		if !errors.Is(err, ErrCrashed) || !errors.Is(err, ErrServer) {
+			t.Fatalf("crash %d: got %v, want ErrCrashed", i, err)
+		}
+	}
+	if _, err := s.EmbedPassages(ctx, "ok.txt", []string{"a normal passage"}); err != nil {
+		t.Fatalf("server dead after crashing inputs: %v", err)
+	}
+	if _, err := s.EmbedQuery(ctx, "a search"); err != nil {
+		t.Fatalf("search fails after crashing inputs: %v", err)
 	}
 }

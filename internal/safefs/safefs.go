@@ -388,7 +388,7 @@ func checkFinalPath(h windows.Handle, want string) error {
 	if err != nil {
 		return err
 	}
-	if !strings.EqualFold(got, filepath.Clean(stripLongPrefix(want))) {
+	if PathKey(got) != PathKey(stripLongPrefix(want)) {
 		return fmt.Errorf("%w: real path is %s", ErrLink, got)
 	}
 	return nil

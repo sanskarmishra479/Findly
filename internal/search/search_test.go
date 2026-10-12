@@ -364,3 +364,31 @@ func TestSnippetUnicodeCase(t *testing.T) {
 		}
 	}
 }
+
+// High-fix review #5: a folder filter must not make the vector scan slow (was 371 ms for
+// 100k files; budget 10 ms).
+func BenchmarkNearestFolderFilter100k(b *testing.B) {
+	r := rand.New(rand.NewPCG(8, 8))
+	c := &VectorCache{}
+	for i := range 100_000 {
+		v := make([]float32, 768)
+		for j := range v {
+			v[j] = float32(r.NormFloat64())
+		}
+		bin, q, _ := vecfmt.Encode(v)
+		c.items = append(c.items, int64(i))
+		c.files = append(c.files, int64(i))
+		c.bins = append(c.bins, bin)
+		c.q = append(c.q, q)
+		p := fmt.Sprintf(`C:\Users\Ravi\Documents\folder%d\file%d.txt`, i%100, i)
+		c.metas = append(c.metas, fileMeta{File: store.File{ID: int64(i), Path: p, Kind: "text"}, Key: strings.ToUpper(p)})
+		c.fileIdx = append(c.fileIdx, int32(i))
+	}
+	bin, q, _ := vecfmt.Encode(vecFor(1, 1, r))
+	qv := embed.Vector{Bin: bin, Q: q}
+	fl := store.Filter{Folder: `C:\Users\Ravi\Documents\folder7`}
+	b.ResetTimer()
+	for b.Loop() {
+		c.Nearest(&qv, Candidates, fl)
+	}
+}

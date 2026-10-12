@@ -144,7 +144,8 @@ func (ix *Indexer) removeDeleted(ctx context.Context, rootID int64, seen map[str
 	}
 	failed := make([]string, len(sc.FailedDirs))
 	for i, d := range sc.FailedDirs {
-		failed[i] = strings.ToUpper(d) + `\`
+		// Same key form as the paths it is compared with (Windows case rules).
+		failed[i] = strings.TrimSuffix(safefs.PathKey(d), `\`) + `\`
 	}
 	known, err := ix.Store.FilesInRoot(ctx, rootID)
 	if err != nil {

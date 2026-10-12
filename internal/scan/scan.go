@@ -68,13 +68,14 @@ var skipFileNames = map[string]bool{"thumbs.db": true, "desktop.ini": true}
 var secretExts = map[string]bool{
 	".pem": true, ".key": true, ".pfx": true, ".p12": true, ".kdbx": true, ".ovpn": true, ".env": true,
 	".ppk": true, ".jks": true, ".keystore": true, ".gpg": true, ".asc": true,
-	".kdb": true, ".psafe3": true, ".1pux": true, ".1pif": true, ".agilekeychain": true, ".opvault": true,
+	".p8": true, ".keychain-db": true, ".kdb": true, ".psafe3": true, ".1pux": true, ".1pif": true, ".agilekeychain": true, ".opvault": true,
 	".tfstate": true, ".tfvars": true,
 }
 
 // Exact file names of credential stores.
 var secretNames = map[string]bool{
 	".netrc": true, "_netrc": true, ".git-credentials": true, ".pgpass": true, "accesskeys.csv": true,
+	"login data": true, ".vault-token": true, "rclone.conf": true, ".s3cfg": true,
 	"logins.csv": true, "logins.json": true, "key4.db": true, "wallet.dat": true, ".npmrc": true, ".pypirc": true,
 }
 
@@ -93,6 +94,10 @@ func IsSecretName(name string) bool {
 		// Password-manager exports: bitwarden_export_20250101.json, lastpass_export.csv, …
 		strings.Contains(n, "bitwarden"), strings.Contains(n, "lastpass"), strings.Contains(n, "1password"),
 		strings.Contains(n, "keepass"), strings.Contains(n, "dashlane"), strings.Contains(n, "nordpass"),
+		// 2FA recovery codes and crypto wallet seed phrases.
+		strings.Contains(n, "recovery-codes"), strings.Contains(n, "recovery_codes"),
+		strings.Contains(n, "backup-codes"), strings.Contains(n, "backup_codes"),
+		strings.Contains(n, "mnemonic"), strings.Contains(n, "seed phrase"), strings.Contains(n, "seed-phrase"),
 		containsSecret(n):
 		return true
 	}

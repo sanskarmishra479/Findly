@@ -718,8 +718,15 @@ func TestCorruptDatabaseIsDetected(t *testing.T) {
 		b[i] = 0xA5
 	}
 	os.WriteFile(path, b, 0o644)
-	if _, err := Open(path); !errors.Is(err, ErrCorrupt) {
-		t.Fatalf("damaged index: got %v, want ErrCorrupt", err)
+	// Damage may or may not be visible at open; Verify must always find it.
+	if s2, err := Open(path); err == nil {
+		err = s2.Verify(ctx)
+		s2.Close()
+		if !errors.Is(err, ErrCorrupt) {
+			t.Fatalf("damaged index: Verify = %v, want ErrCorrupt", err)
+		}
+	} else if !errors.Is(err, ErrCorrupt) {
+		t.Fatalf("damaged index: Open = %v, want ErrCorrupt", err)
 	}
 
 	// A file that is not a database at all.
@@ -730,5 +737,21 @@ func TestCorruptDatabaseIsDetected(t *testing.T) {
 	}
 	if got := DatabaseFiles(path); len(got) != 3 || got[1] != path+"-wal" {
 		t.Fatalf("DatabaseFiles = %v", got)
+	}
+}
+
+// IsCorrupt must not mistake ordinary errors for damage.
+func TestIsCorruptOnlyForDamage(t *testing.T) {
+	for _, err := range []error{
+		errors.New("fts5: malformed MATCH expression"),
+		errors.New(`open C:\not a database\x.db: access denied`),
+	} {
+		if IsCorrupt(err) {
+			t.Errorf("IsCorrupt(%q) = true", err)
+		}
+	}
+	s := openTest(t)
+	if err := s.Verify(context.Background()); err != nil {
+		t.Fatalf("healthy index: %v", err)
 	}
 }

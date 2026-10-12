@@ -5,6 +5,7 @@ package extract
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -214,5 +215,26 @@ func TestZipForgedEntryCount(t *testing.T) {
 	st, _ := f.Stat()
 	if n, err := zipEntryCount(f, st.Size()); err != nil || n != 3 {
 		t.Fatalf("count = %d, %v; want 3", n, err)
+	}
+}
+
+// Full-review follow-up: a forged directory OFFSET (instead of count) must not let a huge
+// directory through; Go's reader would fall back to end-record − size and load it all.
+func TestZipForgedDirectoryOffset(t *testing.T) {
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	zw.Create("word/document.xml")
+	for i := range maxZipEntries + 50 {
+		zw.Create(fmt.Sprintf("e%d", i))
+	}
+	zw.Close()
+	orig := buf.Bytes()
+	eocd := bytes.LastIndex(orig, []byte{0x50, 0x4b, 0x05, 0x06})
+	for name, off := range map[string]uint32{"zero": 0, "mid-header": binary.LittleEndian.Uint32(orig[eocd+16:]) + 7} {
+		b := append([]byte(nil), orig...)
+		binary.LittleEndian.PutUint32(b[eocd+16:], off)
+		if _, err := File(write(t, "forged-"+name+".docx", b)); err == nil {
+			t.Errorf("%s: forged directory offset accepted", name)
+		}
 	}
 }

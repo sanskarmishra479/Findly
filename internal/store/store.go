@@ -106,14 +106,19 @@ func (s *Store) setup(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `PRAGMA journal_mode = WAL`); err != nil {
 		return err
 	}
-	if err := s.migrate(ctx); err != nil {
-		return err
-	}
-	// A damaged index must be noticed at once (plan I-7), not show up later as
-	// half-working search. quick_check reads every page but skips the slow index
-	// cross-checks; it takes about a second per few hundred MB.
+	return s.migrate(ctx)
+}
+
+// Verify reads the whole database looking for damage (plan I-7) and returns ErrCorrupt if
+// it finds any. It is NOT run on every open: it reads every page (~10 s for a 217 MB
+// index), so the app runs it in the background or when idle. Damage met during normal
+// use shows up as an error for which IsCorrupt is true.
+func (s *Store) Verify(ctx context.Context) error {
 	var result string
 	if err := s.db.QueryRowContext(ctx, `PRAGMA quick_check(1)`).Scan(&result); err != nil {
+		if IsCorrupt(err) {
+			return fmt.Errorf("%w: %v", ErrCorrupt, err)
+		}
 		return err
 	}
 	if result != "ok" {
@@ -738,17 +743,30 @@ func (fl Filter) sql() (string, []any) {
 
 // Match reports whether a file passes the filter (for results found outside SQL).
 func (fl Filter) Match(f File) bool {
+	return fl.MatchKey(f, pathKey(f.Path), fl.FolderKey())
+}
+
+// FolderKey is the PathKey prefix of the folder filter ("" without one). Compute it once
+// per search and pass it to MatchKey.
+func (fl Filter) FolderKey() string {
+	if fl.Folder == "" {
+		return ""
+	}
+	prefix := pathKey(fl.Folder)
+	if !strings.HasSuffix(prefix, `\`) {
+		prefix += `\`
+	}
+	return prefix
+}
+
+// MatchKey is Match with the file's PathKey and FolderKey already computed: checking
+// 100k cached files must not compute 200k path keys per search (that took 371 ms).
+func (fl Filter) MatchKey(f File, fileKey, folderKey string) bool {
 	if len(fl.Kinds) > 0 && !slices.Contains(fl.Kinds, f.Kind) {
 		return false
 	}
-	if fl.Folder != "" {
-		prefix := pathKey(fl.Folder)
-		if !strings.HasSuffix(prefix, `\`) {
-			prefix += `\`
-		}
-		if !strings.HasPrefix(pathKey(f.Path), prefix) {
-			return false
-		}
+	if folderKey != "" && !strings.HasPrefix(fileKey, folderKey) {
+		return false
 	}
 	if fl.After != 0 && f.MTime < fl.After {
 		return false
@@ -977,9 +995,10 @@ var ErrCorrupt = errors.New("store: the index is damaged and must be rebuilt")
 
 // IsCorrupt reports whether err means a damaged or non-database index file.
 func IsCorrupt(err error) bool {
-	return errors.Is(err, ErrCorrupt) ||
-		errors.Is(err, sqlite3.CORRUPT) || errors.Is(err, sqlite3.NOTADB) ||
-		strings.Contains(err.Error(), "malformed") || strings.Contains(err.Error(), "not a database")
+	// Error codes only: matching message text also caught unrelated errors such as
+	// "fts5: malformed MATCH expression" or a path containing "not a database".
+	return err != nil && (errors.Is(err, ErrCorrupt) ||
+		errors.Is(err, sqlite3.CORRUPT) || errors.Is(err, sqlite3.NOTADB))
 }
 
 // DatabaseFiles lists the files that make up the index database at path (the database

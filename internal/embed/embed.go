@@ -93,12 +93,13 @@ type Server struct {
 	life   context.Context // cancelled by Close; startup uses it, never a caller's ctx
 	stop   context.CancelFunc
 
-	mu       sync.Mutex
-	proc     *sidecar.Proc
-	base     string // http://127.0.0.1:port
-	key      string
-	log      *sidecar.Tail
-	restarts int // consecutive crashes; reset by a successful request
+	mu         sync.Mutex
+	proc       *sidecar.Proc
+	base       string // http://127.0.0.1:port
+	key        string
+	log        *sidecar.Tail
+	restarts   int  // consecutive crashes; reset by a successful request
+	inputCrash bool // the last exit happened while handling a request (see endpoint)
 
 	cacheMu sync.Mutex
 	cache   map[string]*list.Element
@@ -277,26 +278,34 @@ func (s *Server) Close() {
 }
 
 // endpoint returns the server address and key, restarting a crashed server.
-func (s *Server) endpoint() (base, key string, err error) {
+func (s *Server) endpoint() (base, key string, proc *sidecar.Proc, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.life.Err() != nil {
-		return "", "", fmt.Errorf("%w: closed", ErrServer)
+		return "", "", nil, fmt.Errorf("%w: closed", ErrServer)
 	}
 	exited := s.proc == nil
 	if !exited {
 		exited, _ = s.proc.Exited()
 	}
 	if exited {
-		if s.restarts >= maxRestarts {
-			return "", "", fmt.Errorf("%w: crashed %d times in a row", ErrServer, s.restarts)
+		// A crash caused by one input (ErrCrashed was reported for it) does not count
+		// toward the limit: the indexer already gives up on such files, and counting them
+		// left the server dead for good after two bad files. The limit is for a server
+		// that dies on its own.
+		if s.inputCrash {
+			s.inputCrash = false
+		} else {
+			if s.restarts >= maxRestarts {
+				return "", "", nil, fmt.Errorf("%w: crashed %d times in a row", ErrServer, s.restarts)
+			}
+			s.restarts++
 		}
-		s.restarts++
 		if err := s.launch(); err != nil {
-			return "", "", err
+			return "", "", nil, err
 		}
 	}
-	return s.base, s.key, nil
+	return s.base, s.key, s.proc, nil
 }
 
 func (s *Server) succeeded() {
@@ -378,7 +387,7 @@ func (s *Server) embedOne(ctx context.Context, title, text string) (Vector, erro
 
 // embed sends inputs to POST /v1/embeddings and converts the results.
 func (s *Server) embed(ctx context.Context, inputs []string) ([]Vector, error) {
-	base, key, err := s.endpoint()
+	base, key, proc, err := s.endpoint()
 	if err != nil {
 		return nil, err
 	}
@@ -397,7 +406,7 @@ func (s *Server) embed(ctx context.Context, inputs []string) ([]Vector, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err() // the caller gave up; not the server's fault
 		}
-		if s.crashed() {
+		if s.crashed(proc) {
 			// The process died while handling this request: maybe this input crashes it.
 			return nil, fmt.Errorf("%w: %w: %v", ErrServer, ErrCrashed, err)
 		}
@@ -535,17 +544,18 @@ func tokensInError(msg string) int {
 	return n
 }
 
-// crashed reports whether the server process has exited, waiting briefly: a broken
-// connection is often noticed a moment before the process exit is.
-func (s *Server) crashed() bool {
+// crashed reports whether process p has exited, waiting briefly: a broken connection
+// is often noticed a moment before the process exit is.
+func (s *Server) crashed(p *sidecar.Proc) bool {
+	// Check the very process that handled the request: another caller may already have
+	// restarted the server, and the new process would look healthy.
 	for range 20 {
-		s.mu.Lock()
-		p := s.proc
-		s.mu.Unlock()
-		if p == nil {
-			return true
-		}
 		if exited, _ := p.Exited(); exited {
+			s.mu.Lock()
+			if s.proc == p {
+				s.inputCrash = true
+			}
+			s.mu.Unlock()
 			return true
 		}
 		time.Sleep(50 * time.Millisecond)

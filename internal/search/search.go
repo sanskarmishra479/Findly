@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sanskarmishra479/findly/internal/embed"
+	"github.com/sanskarmishra479/findly/internal/safefs"
 	"github.com/sanskarmishra479/findly/internal/store"
 	"github.com/sanskarmishra479/findly/internal/vecfmt"
 )
@@ -296,7 +297,10 @@ type VectorCache struct {
 	files []int64
 	bins  []vecfmt.Bin
 	q     []vecfmt.Int8
-	meta  map[int64]store.File // per file: path, kind, mtime (for filtering during the scan)
+	// For filtering during the scan: one entry per file, and for each vector the position
+	// of its file in metas. Slices, not maps: a per-search map of 100k files cost 36 ms.
+	metas   []fileMeta
+	fileIdx []int32
 }
 
 // Load replaces the cache with all vectors in the store.
@@ -304,13 +308,19 @@ func (c *VectorCache) Load(ctx context.Context, st *store.Store) error {
 	var items, files []int64
 	var bins []vecfmt.Bin
 	var qs []vecfmt.Int8
-	meta := map[int64]store.File{}
+	var metas []fileMeta
+	var fileIdx []int32
+	pos := map[int64]int32{}
 	err := st.AllVectors(ctx, func(r store.VectorRow) error {
 		items = append(items, r.ItemID)
 		files = append(files, r.File.ID)
-		if _, ok := meta[r.File.ID]; !ok {
-			meta[r.File.ID] = r.File
+		p, ok := pos[r.File.ID]
+		if !ok {
+			p = int32(len(metas))
+			pos[r.File.ID] = p
+			metas = append(metas, fileMeta{File: r.File, Key: safefs.PathKey(r.File.Path)})
 		}
+		fileIdx = append(fileIdx, p)
 		bins = append(bins, vecfmt.Bin(r.Vector.Bin))
 		qs = append(qs, vecfmt.Int8{I8: r.Vector.I8, Scale: r.Vector.Scale})
 		return nil
@@ -319,7 +329,7 @@ func (c *VectorCache) Load(ctx context.Context, st *store.Store) error {
 		return err
 	}
 	c.mu.Lock()
-	c.items, c.files, c.bins, c.q, c.meta = items, files, bins, qs, meta
+	c.items, c.files, c.bins, c.q, c.metas, c.fileIdx = items, files, bins, qs, metas, fileIdx
 	c.mu.Unlock()
 	return nil
 }
@@ -345,16 +355,18 @@ type Scored struct {
 func (c *VectorCache) Nearest(qv *embed.Vector, n int, fl store.Filter) []Scored {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	filtered := !fl.Empty()
-	allowed := map[int64]bool{}
+	filtered := !fl.Empty() && len(c.fileIdx) == len(c.bins)
+	var allowed []bool
 	if filtered {
-		for id, f := range c.meta {
-			allowed[id] = fl.Match(f)
+		folderKey := fl.FolderKey()
+		allowed = make([]bool, len(c.metas))
+		for j, m := range c.metas {
+			allowed[j] = fl.MatchKey(m.File, m.Key, folderKey)
 		}
 	}
 	h := &maxHeap{}
 	for i := range c.bins {
-		if filtered && !allowed[c.files[i]] {
+		if filtered && !allowed[c.fileIdx[i]] {
 			continue
 		}
 		d := vecfmt.Hamming(&qv.Bin, &c.bins[i])
@@ -409,4 +421,11 @@ func (s *Searcher) gap() float64 {
 		return s.MaxBelowBest
 	}
 	return RelativeGap
+}
+
+// fileMeta is what the vector cache keeps per file for filtering. Key is computed once at
+// load time (PathKey per file per search was too slow).
+type fileMeta struct {
+	File store.File
+	Key  string
 }

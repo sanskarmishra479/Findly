@@ -210,7 +210,7 @@ func startLlamaServer(ctx context.Context, backend string, imgTokens int) (*llam
 		logFile.Close()
 		return nil, fmt.Errorf("start llama-server: %w", err)
 	}
-	go func() { cmd.Wait(); logFile.Close() }()
+	go func() { cmd.Wait(); logFile.Close(); os.RemoveAll(work) }() // remove the temporary GPU folder when the server exits
 
 	s := &llamaServer{
 		cmd:    cmd,
