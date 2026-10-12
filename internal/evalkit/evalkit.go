@@ -154,10 +154,10 @@ func MakeDOCX(paragraphs []string) ([]byte, error) {
 	for _, p := range paragraphs {
 		fmt.Fprintf(&body, `<w:p><w:r><w:t xml:space="preserve">%s</w:t></w:r></w:p>`, xmlEscape(p))
 	}
-	return zipOf(map[string]string{
-		"[Content_Types].xml": `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`,
-		"_rels/.rels":         `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`,
-		"word/document.xml":   `<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>` + body.String() + `</w:body></w:document>`,
+	return zipParts([]part{
+		{"[Content_Types].xml", `<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>`, false},
+		{"_rels/.rels", `<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`, false},
+		{"word/document.xml", `<?xml version="1.0" encoding="UTF-8"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>` + body.String() + `</w:body></w:document>`, false},
 	})
 }
 
@@ -167,21 +167,34 @@ func MakeODT(paragraphs []string) ([]byte, error) {
 	for _, p := range paragraphs {
 		fmt.Fprintf(&body, `<text:p>%s</text:p>`, xmlEscape(p))
 	}
-	return zipOf(map[string]string{
-		"mimetype":    "application/vnd.oasis.opendocument.text",
-		"content.xml": `<?xml version="1.0" encoding="UTF-8"?><office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:text>` + body.String() + `</office:text></office:body></office:document-content>`,
+	// OpenDocument rules: "mimetype" must be the first entry and stored uncompressed, and
+	// META-INF/manifest.xml lists the parts (LibreOffice rejects files without them).
+	return zipParts([]part{
+		{"mimetype", "application/vnd.oasis.opendocument.text", true},
+		{"META-INF/manifest.xml", `<?xml version="1.0" encoding="UTF-8"?><manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.2"><manifest:file-entry manifest:full-path="/" manifest:media-type="application/vnd.oasis.opendocument.text"/><manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/></manifest:manifest>`, false},
+		{"content.xml", `<?xml version="1.0" encoding="UTF-8"?><office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0" office:version="1.2"><office:body><office:text>` + body.String() + `</office:text></office:body></office:document-content>`, false},
 	})
 }
 
-func zipOf(parts map[string]string) ([]byte, error) {
+type part struct {
+	name, content string
+	stored        bool // no compression
+}
+
+// zipParts writes the parts in the given order (ranging over a map would randomize it).
+func zipParts(parts []part) ([]byte, error) {
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
-	for name, content := range parts {
-		w, err := zw.Create(name)
+	for _, p := range parts {
+		method := zip.Deflate
+		if p.stored {
+			method = zip.Store
+		}
+		w, err := zw.CreateHeader(&zip.FileHeader{Name: p.name, Method: method})
 		if err != nil {
 			return nil, err
 		}
-		if _, err := w.Write([]byte(content)); err != nil {
+		if _, err := w.Write([]byte(p.content)); err != nil {
 			return nil, err
 		}
 	}
@@ -196,7 +209,7 @@ func zipOf(parts map[string]string) ([]byte, error) {
 // Case is one line of evals/queries.jsonl.
 type Case struct {
 	Query  string   `json:"query"`
-	Expect []string `json:"expect"` // "folder/file.pdf" or "folder/file.pdf#page=3"
+	Expect []string `json:"expect"` // "folder/file.pdf" or "folder/file.pdf#page=3"; empty = should find nothing
 }
 
 // LoadCases reads a JSONL file of cases.
@@ -214,8 +227,8 @@ func LoadCases(path string) ([]Case, error) {
 		if err := json.Unmarshal([]byte(line), &c); err != nil {
 			return nil, fmt.Errorf("%s line %d: %w", path, i+1, err)
 		}
-		if c.Query == "" || len(c.Expect) == 0 {
-			return nil, fmt.Errorf("%s line %d: query and expect are required", path, i+1)
+		if c.Query == "" || c.Expect == nil {
+			return nil, fmt.Errorf("%s line %d: query and expect are required (expect: [] for a query that should find nothing)", path, i+1)
 		}
 		out = append(out, c)
 	}

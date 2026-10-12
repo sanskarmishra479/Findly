@@ -29,3 +29,18 @@
 {"query":"dog vaccination","expect":["home/vet_visit_dog.txt"]}
 {"query":"list comprehension example","expect":["work/python_tips.md"]}
 {"query":"march bank statement","expect":["money/bank_statement_march.csv"]}
+{"query":"pet policy for my flat","expect":["home/lease.pdf#page=2"]}
+{"query":"getting my cash back after leaving the flat","expect":["home/lease.pdf#page=3"]}
+{"query":"how many vacation days do I get","expect":["work/employment_contract.docx"]}
+{"query":"hound immunisation","expect":["home/vet_visit_dog.txt"]}
+{"query":"when do I see the tooth doctor","expect":["personal/dentist_appointment.txt"]}
+{"query":"why was my power consumption higher","expect":["money/electricity_bill_july.txt"]}
+{"query":"who is getting married","expect":["personal/wedding_invitation.html"]}
+{"query":"sweet baked treats with chocolate","expect":["personal/chocolate_cake.odt","personal/chocolate_cookies.md"]}
+{"query":"Ravi Kumar","expect":["home/lease.pdf","home/insurance_policy_home.docx","money/tax_return_2024.pdf","work/employment_contract.docx"]}
+{"query":"Maple Street","expect":["home/lease.pdf","home/insurance_policy_home.docx","money/electricity_bill_july.txt"]}
+{"query":"Northwind","expect":["money/invoice_INV-2024-0042.txt","work/employment_contract.docx"]}
+{"query":"flight booking to London","expect":[]}
+{"query":"quantum physics lecture","expect":[]}
+{"query":"asdfgh qwerty","expect":[]}
+{"query":"stock market crash","expect":[]}

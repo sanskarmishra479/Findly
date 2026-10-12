@@ -31,9 +31,10 @@ const (
 	exactBoost    = 0.05 // more than any single RRF rank difference near the top
 	snippetLength = 200
 	// MinSemantic drops semantic hits whose similarity is too low to mean anything.
-	// Calibrated with cli eval (2026-10-11): 0.60 keeps Recall@5 = 1.0 and cuts unrelated
-	// results from ~23 to ~5 per query; at 0.70 real answers start to drop out.
-	MinSemantic = 0.60
+	// Calibrated with cli eval (2026-10-12, 46 queries incl. paraphrases and "should find
+	// nothing" queries): 0.64 keeps Recall@5 = 1.0; 0.66 starts missing paraphrases;
+	// 0.60 lets 3 of 4 nonsense queries return files.
+	MinSemantic = 0.64
 )
 
 // QueryEmbedder embeds a search query. *embed.Server implements it.
@@ -398,7 +399,7 @@ func (s *Searcher) minScore() float64 {
 // RelativeGap: semantic hits more than this below the best hit are dropped. With
 // EmbeddingGemma, unrelated text scores ~0.5–0.68 and the right passage ~0.73–0.85, so a
 // result far below the best one is almost always noise.
-const RelativeGap = 0.08
+const RelativeGap = 0.06
 
 func (s *Searcher) gap() float64 {
 	switch {

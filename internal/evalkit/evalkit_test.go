@@ -1,6 +1,8 @@
 package evalkit
 
 import (
+	"archive/zip"
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,6 +53,36 @@ func TestLoadCases(t *testing.T) {
 	}
 	os.WriteFile(p, []byte(`{"query":"","expect":[]}`), 0o644)
 	if _, err := LoadCases(p); err == nil {
-		t.Fatal("empty case accepted")
+		t.Fatal("empty query accepted")
+	}
+	os.WriteFile(p, []byte(`{"query":"x"}`), 0o644)
+	if _, err := LoadCases(p); err == nil {
+		t.Fatal("missing expect accepted")
+	}
+	os.WriteFile(p, []byte(`{"query":"nothing here","expect":[]}`), 0o644)
+	if cs, err := LoadCases(p); err != nil || len(cs) != 1 || len(cs[0].Expect) != 0 {
+		t.Fatalf("negative case: %v %v", cs, err)
+	}
+}
+
+// ODT rules: mimetype first and stored; manifest present.
+func TestODTLayout(t *testing.T) {
+	b, err := MakeODT([]string{"hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(b), int64(len(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if zr.File[0].Name != "mimetype" || zr.File[0].Method != zip.Store {
+		t.Fatalf("first entry %q method %d", zr.File[0].Name, zr.File[0].Method)
+	}
+	names := map[string]bool{}
+	for _, f := range zr.File {
+		names[f.Name] = true
+	}
+	if !names["META-INF/manifest.xml"] || !names["content.xml"] {
+		t.Fatalf("entries: %v", names)
 	}
 }

@@ -1,56 +1,84 @@
 {
   "backend": "vulkan",
-  "date": "2026-10-12T10:25:56+05:30",
-  "files": 26,
+  "date": "2026-10-12T11:04:27+05:30",
+  "files": 28,
   "levels": [
     {
-      "cutoff": 0.55,
-      "gap": 0,
-      "recall_at_5": 1,
-      "mrr_at_10": 1,
-      "avg_results": 14.67741935483871,
-      "avg_unrelated": 13.67741935483871
-    },
-    {
-      "cutoff": 0.55,
-      "gap": 0.08,
-      "recall_at_5": 1,
-      "mrr_at_10": 1,
-      "avg_results": 2.4838709677419355,
-      "avg_unrelated": 1.4838709677419355
-    },
-    {
       "cutoff": 0.6,
       "gap": 0,
       "recall_at_5": 1,
-      "mrr_at_10": 1,
-      "avg_results": 6.161290322580645,
-      "avg_unrelated": 5.161290322580645
+      "mrr_at_10": 0.9761904761904762,
+      "avg_results": 7.523809523809524,
+      "avg_unrelated": 6.357142857142857,
+      "negatives_clean": 0.25,
+      "misses": [
+        "flight booking to London (should find nothing)",
+        "asdfgh qwerty (should find nothing)",
+        "stock market crash (should find nothing)"
+      ]
     },
     {
       "cutoff": 0.6,
-      "gap": 0.08,
+      "gap": 0.06,
       "recall_at_5": 1,
-      "mrr_at_10": 1,
-      "avg_results": 2.3870967741935485,
-      "avg_unrelated": 1.3870967741935485
+      "mrr_at_10": 0.9761904761904762,
+      "avg_results": 2.4761904761904763,
+      "avg_unrelated": 1.3095238095238095,
+      "negatives_clean": 0.25,
+      "misses": [
+        "flight booking to London (should find nothing)",
+        "asdfgh qwerty (should find nothing)",
+        "stock market crash (should find nothing)"
+      ]
     },
     {
-      "cutoff": 0.65,
+      "cutoff": 0.64,
       "gap": 0,
       "recall_at_5": 1,
-      "mrr_at_10": 1,
-      "avg_results": 1.7741935483870968,
-      "avg_unrelated": 0.7741935483870968
+      "mrr_at_10": 0.9761904761904762,
+      "avg_results": 2.619047619047619,
+      "avg_unrelated": 1.4523809523809523,
+      "negatives_clean": 0.75,
+      "misses": [
+        "asdfgh qwerty (should find nothing)"
+      ]
     },
     {
-      "cutoff": 0.65,
-      "gap": 0.08,
+      "cutoff": 0.64,
+      "gap": 0.06,
       "recall_at_5": 1,
-      "mrr_at_10": 1,
-      "avg_results": 1.4838709677419355,
-      "avg_unrelated": 0.4838709677419355
+      "mrr_at_10": 0.9761904761904762,
+      "avg_results": 1.7857142857142858,
+      "avg_unrelated": 0.6190476190476191,
+      "negatives_clean": 0.75,
+      "misses": [
+        "asdfgh qwerty (should find nothing)"
+      ]
+    },
+    {
+      "cutoff": 0.66,
+      "gap": 0,
+      "recall_at_5": 0.9761904761904762,
+      "mrr_at_10": 0.9642857142857143,
+      "avg_results": 1.7380952380952381,
+      "avg_unrelated": 0.5952380952380952,
+      "negatives_clean": 1,
+      "misses": [
+        "how many vacation days do I get"
+      ]
+    },
+    {
+      "cutoff": 0.66,
+      "gap": 0.06,
+      "recall_at_5": 0.9761904761904762,
+      "mrr_at_10": 0.9642857142857143,
+      "avg_results": 1.4761904761904763,
+      "avg_unrelated": 0.3333333333333333,
+      "negatives_clean": 1,
+      "misses": [
+        "how many vacation days do I get"
+      ]
     }
   ],
-  "queries": 31
+  "queries": 46
 }

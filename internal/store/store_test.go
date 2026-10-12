@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -624,5 +625,54 @@ func TestFailedFilesRetriedLater(t *testing.T) {
 	s.db.Exec(`UPDATE files SET indexed_at = ? WHERE id = ?`, old, id)
 	if _, changed, _ := s.UpsertFile(ctx, f); !changed {
 		t.Fatal("failed file not retried after the wait")
+	}
+}
+
+// Review: one file with many matching passages must not hide other files, in either path.
+func TestKeywordOneBigFileDoesNotCrowdOut(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	root, _ := s.AddRoot(ctx, `C:\Docs`)
+	big := addFile(t, s, root.ID, `C:\Docs\big.txt`)
+	var items []Item
+	for range 700 {
+		items = append(items, Item{Kind: ItemPassage, Text: "budget numbers again"})
+	}
+	s.ReplaceContent(ctx, big, items)
+	for i := range 19 {
+		id := addFile(t, s, root.ID, filepath.Join(`C:\Docs`, fmt.Sprintf("small%d.txt", i)))
+		s.ReplaceContent(ctx, id, []Item{{Kind: ItemPassage, Text: "a small budget note"}})
+	}
+	for _, ranked := range []bool{true, false} {
+		hits, err := s.KeywordSearch(ctx, `"budget"`, Filter{}, 50, ranked)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(hits) != 20 {
+			t.Errorf("ranked=%v: %d files, want 20", ranked, len(hits))
+		}
+	}
+	// A folder filter that excludes the big file still finds the others.
+	hits, _ := s.KeywordSearch(ctx, `"budget"`, Filter{Folder: `C:\Docs`}, 50, false)
+	if len(hits) != 20 {
+		t.Errorf("filtered: %d files", len(hits))
+	}
+}
+
+// Review: folder filter with non-ASCII folder names (SQLite counts characters).
+func TestFolderFilterNonASCII(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	root, _ := s.AddRoot(ctx, `C:\Users\José\Документы`)
+	id := addFile(t, s, root.ID, `C:\Users\José\Документы\отчёт.txt`)
+	s.ReplaceContent(ctx, id, []Item{{Kind: ItemPassage, Text: "quarterly report"}})
+	for _, ranked := range []bool{true, false} {
+		hits, err := s.KeywordSearch(ctx, `"quarterly"`, Filter{Folder: `c:\users\josé\документы`}, 50, ranked)
+		if err != nil || len(hits) != 1 {
+			t.Errorf("ranked=%v: %d hits, %v", ranked, len(hits), err)
+		}
+	}
+	if hits, _ := s.KeywordSearch(ctx, `"quarterly"`, Filter{Folder: `C:\Users\José\Док`}, 50, true); len(hits) != 0 {
+		t.Error("partial folder name matched")
 	}
 }

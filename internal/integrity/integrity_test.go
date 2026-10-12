@@ -89,9 +89,6 @@ func snapshot(t *testing.T, dir string) map[string]entry {
 			e.SHA = hex.EncodeToString(sum[:])
 		}
 		out[rel] = e
-		if d.Type()&fs.ModeSymlink != 0 || info.Mode()&fs.ModeIrregular != 0 {
-			return fs.SkipDir // junction: recorded, not entered (its target is snapshotted separately)
-		}
 		return nil
 	})
 	if err != nil {
@@ -165,6 +162,7 @@ func buildTree(t *testing.T) (user, outside string) {
 		return p
 	}
 	write("empty.txt", "")
+	write("zzz-last.txt", "sorts after every other entry, including the junction")
 	write("日本語のメモ.txt", "東京で会議があります。")
 	ro := write("readonly.txt", "this file is read-only")
 	setAttrs(t, ro, windows.FILE_ATTRIBUTE_READONLY)
@@ -201,6 +199,13 @@ func buildTree(t *testing.T) (user, outside string) {
 func TestFileIntegrity(t *testing.T) {
 	user, outside := buildTree(t)
 	before, beforeOut := snapshot(t, user), snapshot(t, outside)
+	// The snapshot must really cover the whole tree. (A SkipDir on the junction once made
+	// WalkDir skip everything after it, about 60% of the files, without failing.)
+	for _, want := range []string{"zzz-last.txt", "work", filepath.Join("money", "invoice_INV-2024-0042.txt"), "日本語のメモ.txt", "readonly.txt", "jump"} {
+		if _, ok := before[want]; !ok {
+			t.Fatalf("snapshot is missing %s (has %d entries)", want, len(before))
+		}
+	}
 
 	dataDir := filepath.Join(t.TempDir(), "Findly")
 	afs, err := appfs.Open(dataDir)
@@ -237,6 +242,14 @@ func TestFileIntegrity(t *testing.T) {
 		if stats.Indexed == 0 || stats.Failed != 0 {
 			t.Fatalf("index stats: %+v", stats)
 		}
+		// P-6 and I-4: the secret file and the cloud-only file must not be in the index at all.
+		for _, rel := range []string{filepath.Join("secrets", "api.key"), "cloud-only.txt", "hidden-note.txt"} {
+			if _, ok, _ := st.FileByPath(ctx, filepath.Join(real, rel)); ok {
+				t.Errorf("%s was indexed", rel)
+			}
+		}
+		// No handle may stay open after indexing: every file must open exclusively.
+		assertNoOpenHandles(t, real)
 		// Twice: the second run is the "nothing changed" path.
 		if _, err := ix.IndexRoot(ctx, root); err != nil {
 			t.Fatal(err)
@@ -306,6 +319,7 @@ func TestUserCanChangeFilesWhileIndexing(t *testing.T) {
 	var wg sync.WaitGroup
 	var userErrs []error
 	var mu sync.Mutex
+	opCount := 0
 	wg.Add(1)
 	go func() { // the "user": keeps editing, renaming and deleting files
 		defer wg.Done()
@@ -329,17 +343,28 @@ func TestUserCanChangeFilesWhileIndexing(t *testing.T) {
 					err = os.WriteFile(p, []byte("recreated"), 0o644)
 				}
 			}
+			mu.Lock()
+			opCount++
 			if err != nil {
-				mu.Lock()
 				userErrs = append(userErrs, err)
-				mu.Unlock()
 			}
+			mu.Unlock()
 		}
 	}()
 
 	ix := &index.Indexer{Store: st, Embedder: fakeEmbedder{}, Licensed: func() bool { return true }}
-	for range 3 {
-		if _, err := ix.IndexRoot(ctx, root); err != nil {
+	for run := range 3 {
+		mu.Lock()
+		ops := opCount
+		mu.Unlock()
+		_, err := ix.IndexRoot(ctx, root)
+		mu.Lock()
+		during := opCount - ops
+		mu.Unlock()
+		if during == 0 {
+			t.Errorf("run %d: no user operation overlapped with indexing; the test proved nothing", run)
+		}
+		if err != nil {
 			close(stop)
 			wg.Wait()
 			t.Fatalf("indexing failed while files changed: %v", err)
@@ -350,4 +375,29 @@ func TestUserCanChangeFilesWhileIndexing(t *testing.T) {
 	for _, err := range userErrs {
 		t.Errorf("Findly blocked the user's program: %v", err)
 	}
+}
+
+// assertNoOpenHandles opens every regular file with share mode 0 (exclusive). That fails
+// with a sharing violation if anything (Findly) still holds the file open.
+func assertNoOpenHandles(t *testing.T, dir string) {
+	t.Helper()
+	filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return nil
+		}
+		if attrs(t, p)&windows.FILE_ATTRIBUTE_OFFLINE != 0 {
+			return nil
+		}
+		// Long-path prefix (two backslashes, '?', backslash), built from bytes so no editor
+		// or tool can drop a backslash from it.
+		prefix := string([]byte{'\\', '\\', '?', '\\'})
+		p16, _ := windows.UTF16PtrFromString(prefix + p)
+		h, err := windows.CreateFile(p16, windows.GENERIC_READ, 0, nil, windows.OPEN_EXISTING, 0, 0)
+		if err != nil {
+			t.Errorf("file still open after indexing (%v): %s", err, p)
+			return nil
+		}
+		windows.CloseHandle(h)
+		return nil
+	})
 }

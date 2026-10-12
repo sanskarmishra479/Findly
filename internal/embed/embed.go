@@ -142,6 +142,12 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 	case <-ctx.Done():
 		stop()
 		<-done
+		// The launch may have succeeded just as ctx was cancelled: never leave that
+		// process running, since nobody will get a Server to close it.
+		if s.proc != nil {
+			s.proc.Stop()
+			s.proc = nil
+		}
 		return nil, ctx.Err()
 	}
 }

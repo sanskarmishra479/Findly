@@ -700,9 +700,10 @@ func (fl Filter) sql() (string, []any) {
 		if !strings.HasSuffix(prefix, `\`) {
 			prefix += `\`
 		}
-		// substr comparison instead of LIKE: paths may contain % and _.
-		parts = append(parts, "substr(f.path_key, 1, ?) = ?")
-		args = append(args, len(prefix), prefix)
+		// substr comparison instead of LIKE: paths may contain % and _. length() counts
+		// characters like substr does (len() in Go counts bytes, which broke "José").
+		parts = append(parts, "substr(f.path_key, 1, length(?)) = ?")
+		args = append(args, prefix, prefix)
 	}
 	if fl.After != 0 {
 		parts = append(parts, "f.mtime >= ?")
@@ -752,49 +753,68 @@ type KeywordHit struct {
 }
 
 // KeywordSearch runs an FTS5 MATCH expression (built by the search package, never raw
-// user input) and returns the best hit of each matching file, best files first, up to
-// maxFiles files.
+// user input) and returns the best hit of each matching file, up to maxFiles files.
 //
-// Ranking happens inside the FTS index first (a subquery with LIMIT), and only those
-// rows are joined to items/files: joining every match before ranking took ~270 ms for a
-// common word in 50k passages. The candidate limit is larger with filters, because many
-// candidates may be filtered out.
+// ranked: FTS5 returns the best `window` passages by bm25 (cheap: no joins before the
+// LIMIT), and they are grouped by file in Go. If that window held fewer than maxFiles
+// files but more matches exist (one file with hundreds of hits, or a filter that removed
+// most), the window grows 8× and the query runs again, so no file is ever hidden.
+//
+// !ranked (while typing): matches stream in index order and reading stops once maxFiles
+// different files were seen — about 2 ms, with no window at all.
 func (s *Store) KeywordSearch(ctx context.Context, match string, fl Filter, maxFiles int, ranked bool) ([]KeywordHit, error) {
 	where, args := fl.sql()
-	candidates := 500
-	if where != "1" {
-		candidates = 5000
-	}
-	// Ranking scores every match (67 ms for a word in 25k of 50k passages). While the user
-	// is still typing, the first matches are good enough and arrive in about a millisecond;
-	// the ranked search runs once typing pauses.
-	inner := `SELECT rowid AS id, bm25(items_fts, 2.0, 1.0) AS r
-		      FROM items_fts WHERE items_fts MATCH ? ORDER BY r LIMIT ?`
 	if !ranked {
-		inner = `SELECT rowid AS id, 0.0 AS r FROM items_fts WHERE items_fts MATCH ? LIMIT ?`
+		q := `
+		SELECT i.id, i.file_id, i.kind, coalesce(i.locator, ''), coalesce(i.text, ''), 0.0
+		FROM items_fts
+		JOIN items i ON i.id = items_fts.rowid
+		JOIN files f ON f.id = i.file_id
+		WHERE items_fts MATCH ? AND ` + where
+		return s.collectHits(ctx, q, append([]any{match}, args...), maxFiles)
 	}
 	q := `
 		SELECT i.id, i.file_id, i.kind, coalesce(i.locator, ''), coalesce(i.text, ''), k.r
-		FROM (` + inner + `) k
+		FROM (SELECT rowid AS id, bm25(items_fts, 2.0, 1.0) AS r
+		      FROM items_fts WHERE items_fts MATCH ? ORDER BY r LIMIT ?) k
 		JOIN items i ON i.id = k.id
 		JOIN files f ON f.id = i.file_id
 		WHERE ` + where + `
 		ORDER BY k.r`
-	all := append([]any{match, candidates}, args...)
-	rows, err := s.db.QueryContext(ctx, q, all...)
+	total := -1 // number of matching passages, counted only if needed
+	for window := 1000; ; window *= 8 {
+		hits, err := s.collectHits(ctx, q, append([]any{match, window}, args...), maxFiles)
+		if err != nil || len(hits) >= maxFiles {
+			return hits, err
+		}
+		if total < 0 {
+			if err := s.db.QueryRowContext(ctx,
+				`SELECT count(*) FROM items_fts WHERE items_fts MATCH ?`, match).Scan(&total); err != nil {
+				return nil, err
+			}
+		}
+		if window >= total {
+			return hits, nil // the window already held every match
+		}
+	}
+}
+
+// collectHits reads rows and keeps the first hit of each file until maxFiles files.
+func (s *Store) collectHits(ctx context.Context, q string, args []any, maxFiles int) ([]KeywordHit, error) {
+	rs, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rs.Close()
 	var out []KeywordHit
 	seen := map[int64]bool{}
-	for rows.Next() {
+	for rs.Next() {
 		var h KeywordHit
-		if err := rows.Scan(&h.ItemID, &h.FileID, &h.Kind, &h.Locator, &h.Text, &h.Rank); err != nil {
+		if err := rs.Scan(&h.ItemID, &h.FileID, &h.Kind, &h.Locator, &h.Text, &h.Rank); err != nil {
 			return nil, err
 		}
 		if seen[h.FileID] {
-			continue // one hit per file, so one big file cannot crowd out the others
+			continue // one hit per file: the first is the best (ranked) or any (typing)
 		}
 		seen[h.FileID] = true
 		out = append(out, h)
@@ -802,7 +822,7 @@ func (s *Store) KeywordSearch(ctx context.Context, match string, fl Filter, maxF
 			break
 		}
 	}
-	return out, rows.Err()
+	return out, rs.Err()
 }
 
 // VectorRow is one stored vector with its item and file.

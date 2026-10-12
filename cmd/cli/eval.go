@@ -29,8 +29,8 @@ func runEval(args []string) error {
 	corpus := fs.String("corpus", filepath.Join("evals", "corpus"), "testbed sources")
 	queries := fs.String("queries", filepath.Join("evals", "queries.jsonl"), "queries file")
 	resultsDir := fs.String("results", filepath.Join("evals", "results"), "where to save the results JSON")
-	cutoffs := fs.String("cutoffs", "0.55,0.60,0.65", "absolute semantic cutoffs to compare")
-	gaps := fs.String("gaps", "0,0.08", "relative cutoffs to compare (drop hits this far below the best; 0 = off)")
+	cutoffs := fs.String("cutoffs", "0.60,0.64,0.66", "absolute semantic cutoffs to compare")
+	gaps := fs.String("gaps", "0,0.06", "relative cutoffs to compare (drop hits this far below the best; 0 = off)")
 	verbose := fs.Bool("v", false, "show every query's top results")
 	fs.Parse(args)
 
@@ -98,18 +98,20 @@ func runEval(args []string) error {
 		kw, sem []search.Result
 	}
 	runs := make([]run, len(cases))
-	var latency time.Duration
+	var kwTime, semTime time.Duration
 	for i, c := range cases {
 		t0 := time.Now()
 		kw, err := s.Keyword(ctx, c.Query, store.Filter{}, false)
 		if err != nil {
 			return fmt.Errorf("%q: %w", c.Query, err)
 		}
+		t1 := time.Now()
+		kwTime += t1.Sub(t0)
 		sem, err := s.Semantic(ctx, c.Query, store.Filter{})
 		if err != nil {
 			return fmt.Errorf("%q: %w", c.Query, err)
 		}
-		latency += time.Since(t0)
+		semTime += time.Since(t1)
 		runs[i] = run{kw, sem}
 	}
 
@@ -118,8 +120,9 @@ func runEval(args []string) error {
 		Gap      float64  `json:"gap"`
 		Recall5  float64  `json:"recall_at_5"`
 		MRR10    float64  `json:"mrr_at_10"`
-		Returned float64  `json:"avg_results"`   // how many results a query shows
-		Noise    float64  `json:"avg_unrelated"` // of those, how many are not expected
+		Returned float64  `json:"avg_results"`     // how many results a query shows
+		Noise    float64  `json:"avg_unrelated"`   // of those, how many are not expected
+		NegClean float64  `json:"negatives_clean"` // share of "should find nothing" queries that found nothing
 		Misses   []string `json:"misses,omitempty"`
 	}
 	type setting struct{ cutoff, gap float64 }
@@ -130,10 +133,11 @@ func runEval(args []string) error {
 		}
 	}
 	var report []levelResult
-	fmt.Printf("\n%-8s %-6s %-10s %-8s %-12s %s\n", "cutoff", "gap", "Recall@5", "MRR@10", "avg results", "avg unrelated")
+	fmt.Printf("\n%-8s %-6s %-10s %-8s %-12s %-14s %s\n", "cutoff", "gap", "Recall@5", "MRR@10", "avg results", "avg unrelated", "negatives clean")
 	for _, set := range settings {
 		lv, gap := set.cutoff, set.gap
 		lr := levelResult{Cutoff: lv, Gap: gap}
+		positives, negatives := 0, 0
 		for i, c := range cases {
 			// Same rule as Searcher.Semantic: absolute floor, raised to best-gap.
 			floor := lv
@@ -148,6 +152,16 @@ func runEval(args []string) error {
 			}
 			fused := search.Fuse(search.Parse(c.Query), runs[i].kw, sem)
 			hits := toHits(bed, fused)
+			if len(c.Expect) == 0 { // negative query: the right answer is "nothing"
+				if len(hits) == 0 {
+					lr.NegClean++
+				} else {
+					lr.Misses = append(lr.Misses, c.Query+" (should find nothing)")
+				}
+				negatives++
+				continue
+			}
+			positives++
 			r5, rr := evalkit.Score(c, hits)
 			lr.Recall5 += r5
 			lr.MRR10 += rr
@@ -177,18 +191,22 @@ func runEval(args []string) error {
 				fmt.Println()
 			}
 		}
-		q := float64(len(cases))
+		q := float64(max(positives, 1))
 		lr.Recall5, lr.MRR10, lr.Returned, lr.Noise = lr.Recall5/q, lr.MRR10/q, lr.Returned/q, lr.Noise/q
+		if negatives > 0 {
+			lr.NegClean /= float64(negatives)
+		}
 		report = append(report, lr)
-		fmt.Printf("%-8.2f %-6.2f %-10.3f %-8.3f %-12.1f %.1f\n", lv, gap, lr.Recall5, lr.MRR10, lr.Returned, lr.Noise)
+		fmt.Printf("%-8.2f %-6.2f %-10.3f %-8.3f %-12.1f %-14.1f %.2f\n", lv, gap, lr.Recall5, lr.MRR10, lr.Returned, lr.Noise, lr.NegClean)
 	}
 	for _, lr := range report {
 		if len(lr.Misses) > 0 {
 			fmt.Printf("\nmisses at cutoff %.2f gap %.2f: %s\n", lr.Cutoff, lr.Gap, strings.Join(lr.Misses, " | "))
 		}
 	}
-	fmt.Printf("\naverage search time (keyword + query embedding + semantic): %v\n",
-		(latency / time.Duration(len(cases))).Round(time.Millisecond))
+	per := time.Duration(len(cases))
+	fmt.Printf("\naverage search time: keyword %v, meaning (query embedding + vector scan) %v\n",
+		(kwTime / per).Round(100*time.Microsecond), (semTime / per).Round(100*time.Microsecond))
 
 	if err := os.MkdirAll(*resultsDir, 0o755); err != nil {
 		return err
