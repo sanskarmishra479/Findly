@@ -54,9 +54,11 @@ func runIndex(args []string) error {
 	defer stop()
 
 	// Start the model first: if its files are missing, no empty folder entry is left behind.
+	modelStart := time.Now()
 	if err := en.startEmbedder(ctx, ef, true); err != nil {
 		return err
 	}
+	modelTook := time.Since(modelStart)
 	ix := &index.Indexer{
 		Store:    en.store,
 		Embedder: en.emb,
@@ -86,6 +88,10 @@ func runIndex(args []string) error {
 	fmt.Printf("skipped:  %d secret-looking, %d cloud-only, %d links, %d too large, %d unreadable folders\n",
 		st.Scan.Secret, st.Scan.CloudOnly, st.Scan.Links, st.Scan.TooLarge, st.Scan.Errors)
 	fmt.Printf("time:     %v\n", time.Since(start).Round(time.Millisecond))
+	r := func(d time.Duration) time.Duration { return d.Round(100 * time.Millisecond) }
+	tm := st.Timing
+	fmt.Printf("          model start %v; extract %v (summed over workers); embed %v (%d passages); save %v; waiting for extraction %v\n",
+		r(modelTook), r(tm.Extract), r(tm.Embed), tm.Passages, r(tm.Save), r(tm.Total-tm.Embed-tm.Save))
 	return nil
 }
 

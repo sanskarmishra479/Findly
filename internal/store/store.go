@@ -619,11 +619,12 @@ func (s *Store) HasContent(ctx context.Context, fileID int64) (bool, error) {
 	return n == 1, err
 }
 
-// CopyDuplicate looks for another fully indexed file with the same content hash and, if
-// one exists, copies its items, vectors and keyword rows to file `to` — all in one
-// transaction, so the source cannot disappear halfway. Identical files are embedded only
-// once (plan 9.10). copied is false if there is no usable source.
-func (s *Store) CopyDuplicate(ctx context.Context, hash string, to int64) (copied bool, err error) {
+// CopyDuplicate looks for another file with the same content hash and the same status
+// (done, or partial: the same pages read so far) and, if one exists, copies its items,
+// vectors and keyword rows to file `to`, all in one transaction, so the source cannot
+// disappear halfway. Identical files are embedded only once (plan 9.10). copied is false
+// if there is no usable source.
+func (s *Store) CopyDuplicate(ctx context.Context, hash, status string, to int64) (copied bool, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -635,7 +636,7 @@ func (s *Store) CopyDuplicate(ctx context.Context, hash string, to int64) (copie
 		SELECT f.id FROM files f
 		WHERE f.content_hash = ? AND f.status = ? AND f.id <> ?
 		  AND EXISTS(SELECT 1 FROM items i WHERE i.file_id = f.id AND i.kind <> ?)
-		LIMIT 1`, hash, StatusDone, to, ItemName).Scan(&from)
+		LIMIT 1`, hash, status, to, ItemName).Scan(&from)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

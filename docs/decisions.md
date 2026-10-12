@@ -253,3 +253,8 @@ Real folder: `C:\Users\sansk\OneDrive\Documents` (user's OK), Vulkan, separate t
   - Duplicate copies (5 identical reports) fill the result list; the UI should group identical files (same content hash).
   - "Conclusion and future scope" found the table of contents, because the real conclusion lies past page 30 (deferred pages).
   - 2 min 14 s for ~150 unique passages seems slow; profile PDF extraction versus embedding before Phase 3.
+
+## Indexing speed investigation (2026-10-12)
+- `index.Stats.Timing` and `cli index` now report the time spent on model start, extraction (summed over workers), embedding (with the passage count), and saving, plus the time spent waiting for extraction.
+- On the real Documents folder (Vulkan, warm): **21.5 s total** = model start ~7 s + embedding ~12.5 s (307 passages, ~40 ms each) + waiting for the first extraction ~9 s. Database writes ~0.2 s. The first run took 2 min 14 s and a second run 1 min 4 s (embedding 60 s for 357 passages); the difference is one-time GPU/driver warm-up and cold file caches, not Findly code.
+- **Bug fixed:** long PDFs (`partial`, first 30 pages) were never deduplicated, because `contentHash` returned "" for them and `CopyDuplicate` required `done`. Now partial files get a hash, and a copy is only made between files with the **same status**. `ss.pdf` (a true copy) is no longer embedded twice. The five "Major Project Report" files are different versions (sizes differ), not copies.

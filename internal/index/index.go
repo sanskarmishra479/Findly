@@ -74,6 +74,17 @@ type Stats struct {
 	Deleted   int      // removed from the index because they no longer exist
 	Thumbs    []string // thumbnails of deleted files, for the caller to remove
 	Deferred  int      // PDFs with pages left for a later pass (Phase 4)
+	Timing    Timing   // where the time went
+}
+
+// Timing splits a run's time by stage. Extract is summed over the parallel workers, so
+// it can exceed Total.
+type Timing struct {
+	Extract  time.Duration // reading files and pulling out text
+	Embed    time.Duration // waiting for the embedding model
+	Passages int           // passages sent to the embedding model
+	Save     time.Duration // embedding stage minus Embed: chunking and database writes
+	Total    time.Duration // the whole embed-and-store stage, from first job to last
 }
 
 // ErrEmbedder means the embedding server is not working; the run stops instead of
@@ -219,6 +230,7 @@ type extracted struct {
 	doc  extract.Doc
 	hash string
 	err  error
+	took time.Duration // extraction time
 }
 
 // freeTier tracks how many files have content, shared by the feeder and the store stage.
@@ -280,7 +292,9 @@ func (ix *Indexer) run(ctx context.Context, rootPath string, jobs []job, st *Sta
 					return // cancelled: don't start another (possibly slow) extraction
 				}
 				r := extracted{job: j}
+				start := time.Now()
 				r.doc, r.err = extract.File(j.file.Path)
+				r.took = time.Since(start)
 				if r.err == nil {
 					r.hash = contentHash(j.file.Kind, r.doc)
 				}
@@ -318,13 +332,21 @@ func (ix *Indexer) run(ctx context.Context, rootPath string, jobs []job, st *Sta
 	go func() { wg.Wait(); close(results) }()
 
 	// Stage 2: embed and store, one file at a time.
+	stage2 := time.Now()
+	defer func() {
+		st.Timing.Total = time.Since(stage2)
+		st.Timing.Save -= st.Timing.Embed
+	}()
 	var runErr error
 	crashes := 0 // consecutive files that crashed the embedding server
 	for r := range results {
 		if runErr != nil {
 			continue // draining after a fatal error so the workers can exit
 		}
-		status, err := ix.save(ctx, r, tier, &crashes)
+		st.Timing.Extract += r.took
+		start := time.Now()
+		status, err := ix.save(ctx, r, tier, &crashes, &st.Timing)
+		st.Timing.Save += time.Since(start)
 		if err != nil {
 			runErr = err
 			cancel()
@@ -346,7 +368,7 @@ const maxCrashFiles = 3
 
 // save embeds and stores one extracted file and returns the status it recorded. (Not
 // named "store": that is the package it writes to.)
-func (ix *Indexer) save(ctx context.Context, r extracted, tier *freeTier, crashes *int) (string, error) {
+func (ix *Indexer) save(ctx context.Context, r extracted, tier *freeTier, crashes *int, tm *Timing) (string, error) {
 	id := r.job.id
 	set := func(status, hash, msg string) (string, error) {
 		return status, ix.Store.SetFileResult(ctx, id, status, "", hash, msg)
@@ -370,8 +392,8 @@ func (ix *Indexer) save(ctx context.Context, r extracted, tier *freeTier, crashe
 	}
 
 	// Identical content already indexed: copy instead of embedding again.
-	if r.hash != "" && status == store.StatusDone {
-		copied, err := ix.Store.CopyDuplicate(ctx, r.hash, id)
+	if r.hash != "" {
+		copied, err := ix.Store.CopyDuplicate(ctx, r.hash, status, id)
 		if err != nil {
 			return "", err
 		}
@@ -381,11 +403,11 @@ func (ix *Indexer) save(ctx context.Context, r extracted, tier *freeTier, crashe
 		}
 	}
 
-	items, err := ix.items(ctx, r)
+	items, err := ix.items(ctx, r, tm)
 	if errors.Is(err, embed.ErrCrashed) {
 		// Plan section 5: the server restarts automatically; try this file once more. If it
 		// crashes again, this file is the likely cause: mark it failed and continue.
-		items, err = ix.items(ctx, r)
+		items, err = ix.items(ctx, r, tm)
 		if errors.Is(err, embed.ErrCrashed) {
 			if *crashes++; *crashes >= maxCrashFiles {
 				return "", err
@@ -419,7 +441,7 @@ func (ix *Indexer) account(tier *freeTier, j job, hasContent bool) {
 
 // items chunks the document and embeds the passages. Mostly-numeric text (data
 // exports) is stored for keyword search only (plan 9.3).
-func (ix *Indexer) items(ctx context.Context, r extracted) ([]store.Item, error) {
+func (ix *Indexer) items(ctx context.Context, r extracted, tm *Timing) ([]store.Item, error) {
 	sections := make([]chunk.Section, len(r.doc.Sections))
 	for i, s := range r.doc.Sections {
 		sections[i] = chunk.Section{Page: s.Page, Text: s.Text}
@@ -439,7 +461,10 @@ func (ix *Indexer) items(ctx context.Context, r extracted) ([]store.Item, error)
 		}
 	}
 	if len(toEmbed) > 0 {
+		start := time.Now()
 		vecs, err := ix.Embedder.EmbedPassages(ctx, r.job.file.Name, toEmbed)
+		tm.Embed += time.Since(start)
+		tm.Passages += len(toEmbed)
 		if err != nil {
 			switch {
 			case ctx.Err() != nil:
@@ -476,7 +501,11 @@ func locator(c chunk.Chunk) string {
 // contentHash identifies identical extracted content (for dedupe), not raw bytes, so
 // it costs no extra file read.
 func contentHash(kind string, d extract.Doc) string {
-	if len(d.Sections) == 0 || d.MorePages {
+	// Partial PDFs (first 30 pages) get a hash too: CopyDuplicate only copies between
+	// files with the same status, so a partial copy is never mixed with a complete one.
+	// Two PDFs that differ only after page 30 share it until the deferred pass (Phase 4)
+	// reads the rest of each file separately.
+	if len(d.Sections) == 0 {
 		return ""
 	}
 	h := sha256.New()

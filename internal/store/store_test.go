@@ -561,10 +561,10 @@ func TestDedupeCopyContent(t *testing.T) {
 	})
 	s.SetFileResult(ctx, orig, StatusDone, "", "hash1", "")
 
-	if copied, _ := s.CopyDuplicate(ctx, "hash1", orig); copied {
+	if copied, _ := s.CopyDuplicate(ctx, "hash1", StatusDone, orig); copied {
 		t.Fatal("copied from itself")
 	}
-	if copied, err := s.CopyDuplicate(ctx, "hash1", dup); err != nil || !copied {
+	if copied, err := s.CopyDuplicate(ctx, "hash1", StatusDone, dup); err != nil || !copied {
 		t.Fatalf("CopyDuplicate = %v %v", copied, err)
 	}
 	if n := count(t, s, `SELECT count(*) FROM items WHERE file_id = ? AND kind <> ?`, dup, ItemName); n != 2 {
@@ -581,7 +581,7 @@ func TestDedupeCopyContent(t *testing.T) {
 	if n := matches(t, s, "quarterly"); n != 1 {
 		t.Errorf("after delete: %d, want 1", n)
 	}
-	if copied, _ := s.CopyDuplicate(ctx, "unknown", dup); copied {
+	if copied, _ := s.CopyDuplicate(ctx, "unknown", StatusDone, dup); copied {
 		t.Error("unknown hash copied")
 	}
 }
@@ -817,5 +817,24 @@ func TestEnsureModelNoWriteLockWhenRecorded(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("EnsureModel waited for the write lock")
+	}
+}
+
+// Long PDFs are "partial" (first 30 pages); identical ones must still be embedded once,
+// but only copied between files with the same status (the same pages read so far).
+func TestDedupePartialFiles(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	root, _ := s.AddRoot(ctx, `C:\Docs`)
+	orig := addFile(t, s, root.ID, `C:\Docs\report.pdf`)
+	dup := addFile(t, s, root.ID, `C:\Docs\report(1).pdf`)
+	s.ReplaceContent(ctx, orig, []Item{{Kind: ItemPassage, Locator: `{"page":1}`, Text: "page one", Vector: vec(1)}})
+	s.SetFileResult(ctx, orig, StatusPartial, "", "hashP", "")
+
+	if copied, _ := s.CopyDuplicate(ctx, "hashP", StatusDone, dup); copied {
+		t.Fatal("a fully read file was given a partial file's content")
+	}
+	if copied, err := s.CopyDuplicate(ctx, "hashP", StatusPartial, dup); err != nil || !copied {
+		t.Fatalf("partial duplicate not copied: %v %v", copied, err)
 	}
 }
