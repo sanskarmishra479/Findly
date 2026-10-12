@@ -41,6 +41,10 @@ func PassageText(title, text string) string {
 	return "title: " + title + " | text: " + text
 }
 
+// ModelVersion identifies the embedding model and runtime build; it is stored in the
+// index (store.EnsureModel). Change it whenever vectors would change.
+const ModelVersion = "embeddinggemma-2-Q8_0/llama.cpp-b11552/256d"
+
 const (
 	ModelDim      = 768      // EmbeddingGemma 2 output size; anything else is the wrong model
 	BatchSize     = 16       // passages per request (plan 9.8; tune with cli bench)
@@ -136,7 +140,7 @@ func Start(ctx context.Context, cfg Config) (*Server, error) {
 		client: &http.Client{
 			// Only ever talks to our own loopback server: never through a proxy.
 			Transport: &http.Transport{Proxy: nil, MaxIdleConnsPerHost: 4},
-			Timeout:   5 * time.Minute,
+			// No fixed client timeout: each request gets one scaled to its size (see embed).
 		},
 		cache: map[string]*list.Element{},
 		order: list.New(),
@@ -408,7 +412,11 @@ func (s *Server) embed(ctx context.Context, inputs []string) ([]Vector, error) {
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/v1/embeddings", bytes.NewReader(body))
+	// A fixed 5-minute limit was too short for 16 long passages on a slow CPU (~20 s each
+	// for rare scripts): allow 1 minute plus 1 minute per input.
+	reqCtx, cancelReq := context.WithTimeout(ctx, requestTimeout(len(inputs)))
+	defer cancelReq()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, base+"/v1/embeddings", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -575,3 +583,5 @@ func (s *Server) crashed(p *sidecar.Proc) bool {
 	}
 	return false
 }
+
+func requestTimeout(inputs int) time.Duration { return time.Minute * time.Duration(1+inputs) }

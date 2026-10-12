@@ -593,8 +593,14 @@ func TestSkippedFilesAreRetried(t *testing.T) {
 	f := File{RootID: root.ID, Path: `C:\Docs\a.txt`, Name: "a.txt", Ext: ".txt", Kind: "text", Size: 1, MTime: 1}
 	id, _, _ := s.UpsertFile(ctx, f)
 	s.SetFileResult(ctx, id, StatusSkipped, "", "", "free tier limit")
-	if _, changed, _ := s.UpsertFile(ctx, f); !changed {
-		t.Fatal("skipped file not offered for indexing again")
+	// Not re-offered on every scan (that cost a write per skipped file per rescan)…
+	if _, changed, _ := s.UpsertFile(ctx, f); changed {
+		t.Fatal("unchanged skipped file offered again on every scan")
+	}
+	// …but listed by SkippedFiles, for when a license or free slots are available.
+	skipped, err := s.SkippedFiles(ctx, root.ID, 10)
+	if err != nil || len(skipped) != 1 || skipped[0].ID != id || skipped[0].Size != 1 {
+		t.Fatalf("SkippedFiles = %+v, %v", skipped, err)
 	}
 }
 
@@ -753,5 +759,23 @@ func TestIsCorruptOnlyForDamage(t *testing.T) {
 	s := openTest(t)
 	if err := s.Verify(context.Background()); err != nil {
 		t.Fatalf("healthy index: %v", err)
+	}
+}
+
+// Medium #14: the model is recorded and a different model is refused.
+func TestEnsureModel(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if err := s.EnsureModel(ctx, "model-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.EnsureModel(ctx, "model-a"); err != nil {
+		t.Fatalf("same model refused: %v", err)
+	}
+	if err := s.EnsureModel(ctx, "model-b"); !errors.Is(err, ErrModelChanged) {
+		t.Fatalf("got %v, want ErrModelChanged", err)
+	}
+	if v, ok, _ := s.Meta(ctx, "created_at"); !ok || v == "" {
+		t.Fatal("created_at not recorded")
 	}
 }

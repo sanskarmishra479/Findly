@@ -302,3 +302,21 @@ func TestCodesAndSeedNames(t *testing.T) {
 		}
 	}
 }
+
+// Medium #16: a credentials folder chosen directly (or a folder inside one) is refused.
+func TestSecretRootRefused(t *testing.T) {
+	base := t.TempDir()
+	for _, rel := range []string{".aws", `.ssh\keys`, "My Passwords", `Work\credentials\old`} {
+		p := filepath.Join(base, rel)
+		os.MkdirAll(p, 0o755)
+		os.WriteFile(filepath.Join(p, "config.txt"), []byte("x"), 0o644)
+		if _, err := Root(context.Background(), p, Options{}, func(File) error { return nil }); !errors.Is(err, ErrSecretRoot) {
+			t.Errorf("%s: got %v, want ErrSecretRoot", rel, err)
+		}
+	}
+	ok := filepath.Join(base, "AppData", "Local", "MyNotes")
+	os.MkdirAll(ok, 0o755)
+	if _, err := Root(context.Background(), ok, Options{}, func(File) error { return nil }); err != nil {
+		t.Errorf("a normal folder inside AppData refused: %v", err)
+	}
+}

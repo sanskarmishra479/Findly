@@ -357,7 +357,7 @@ func (s *Store) UpsertFile(ctx context.Context, f File) (id int64, changed bool,
 
 	id = old.ID
 	changed = old.Size != f.Size || old.MTime != f.MTime ||
-		old.Status == StatusPending || old.Status == StatusSkipped || // skipped (free tier): retried, e.g. after purchase
+		old.Status == StatusPending || // skipped (free tier) files are NOT re-offered here: see SkippedFiles
 		// Failures can be temporary (file locked, engine busy): retry once a day.
 		old.Status == StatusFailed && time.Since(time.Unix(0, indexedAt.Int64)) > RetryFailedAfter
 	status := old.Status
@@ -1005,4 +1005,62 @@ func IsCorrupt(err error) bool {
 // and its WAL/shared-memory files), for deleting a damaged index.
 func DatabaseFiles(path string) []string {
 	return []string{path, path + "-wal", path + "-shm"}
+}
+
+// SkippedFiles returns up to limit files of a root that were skipped by the free-tier
+// limit (and not changed since), so the indexer can pick them up when a license or free
+// slots become available.
+func (s *Store) SkippedFiles(ctx context.Context, rootID int64, limit int) ([]File, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, root_id, path, name, ext, kind, size, mtime, status
+		FROM files WHERE root_id = ? AND status = ? ORDER BY mtime DESC LIMIT ?`,
+		rootID, StatusSkipped, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []File
+	for rows.Next() {
+		var f File
+		if err := rows.Scan(&f.ID, &f.RootID, &f.Path, &f.Name, &f.Ext, &f.Kind, &f.Size, &f.MTime, &f.Status); err != nil {
+			return nil, err
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// ErrModelChanged means the index was built with a different embedding model (or vector
+// size) than the one in use: its vectors cannot be compared with new ones, so the index
+// must be rebuilt (plan 7: "prompt the user before re-indexing").
+var ErrModelChanged = errors.New("store: the index was built with a different model")
+
+// EnsureModel records the embedding model and vector size on first use (plan 8 meta) and
+// returns ErrModelChanged if the index was built with different ones.
+func (s *Store) EnsureModel(ctx context.Context, modelVersion string) error {
+	dim := strconv.Itoa(VectorDim)
+	have, ok, err := s.Meta(ctx, "model_version")
+	if err != nil {
+		return err
+	}
+	if !ok {
+		for k, v := range map[string]string{
+			"model_version": modelVersion,
+			"vector_dim":    dim,
+			"created_at":    time.Now().UTC().Format(time.RFC3339),
+		} {
+			if err := s.SetMeta(ctx, k, v); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	haveDim, _, err := s.Meta(ctx, "vector_dim")
+	if err != nil {
+		return err
+	}
+	if have != modelVersion || haveDim != dim {
+		return fmt.Errorf("%w: index has %s (%s dims), this app uses %s (%s dims)", ErrModelChanged, have, haveDim, modelVersion, dim)
+	}
+	return nil
 }

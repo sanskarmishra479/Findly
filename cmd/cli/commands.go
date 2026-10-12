@@ -31,9 +31,12 @@ func runIndex(args []string) error {
 	if fs.NArg() != 1 {
 		return errors.New("usage: cli index [flags] <folder>")
 	}
-	folder, err := safefs.Canonical(fs.Arg(0))
+	folder, err := absFolder(fs.Arg(0)) // relative paths like "docs" work too
 	if err != nil {
-		return fmt.Errorf("folder %s: %w", fs.Arg(0), err)
+		return err
+	}
+	if info, err := safefs.Stat(folder); err != nil || !info.IsDir() {
+		return fmt.Errorf("%s is not a folder", fs.Arg(0))
 	}
 
 	en, err := openEngine(ef)
@@ -94,7 +97,22 @@ func runSearch(args []string) error {
 	if fs.NArg() == 0 {
 		return errors.New(`usage: cli search [flags] "<query>"`)
 	}
+	// Go's flag package stops at the first non-flag argument, so in
+	// `cli search "rent due" -n 1` the "-n 1" would silently become search words.
+	for _, a := range fs.Args()[1:] {
+		if strings.HasPrefix(a, "-") {
+			return fmt.Errorf("put flags before the query: cli search %s \"%s\"", a, fs.Arg(0))
+		}
+	}
 	query := strings.Join(fs.Args(), " ")
+	if *limit < 1 {
+		return errors.New("-n must be at least 1")
+	}
+	for _, k := range strings.Split(*kinds, ",") {
+		if k = strings.ToLower(strings.TrimSpace(k)); k != "" && !validKinds[k] {
+			return fmt.Errorf("unknown -kind %q (use text, doc, pdf, image, audio, video, other)", k)
+		}
+	}
 
 	en, err := openEngine(ef)
 	if err != nil {
@@ -304,3 +322,5 @@ func runCheck(args []string) error {
 	fmt.Printf("index is healthy (checked in %v)\n", time.Since(start).Round(time.Millisecond))
 	return nil
 }
+
+var validKinds = map[string]bool{"text": true, "doc": true, "pdf": true, "image": true, "audio": true, "video": true, "other": true}

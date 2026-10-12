@@ -103,7 +103,7 @@ func Stat(path string) (Info, error) {
 }
 
 // Open opens a regular file for reading only. The caller must Close it.
-func Open(path string) (*os.File, error) {
+func Open(path string) (*File, error) {
 	info, err := Stat(path)
 	if err != nil {
 		return nil, err
@@ -123,7 +123,7 @@ func Open(path string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	fail := func(h windows.Handle, err error) (*os.File, error) {
+	fail := func(h windows.Handle, err error) (*File, error) {
 		windows.CloseHandle(h)
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
@@ -169,7 +169,7 @@ func Open(path string) (*os.File, error) {
 		}
 		h = h2
 	}
-	return os.NewFile(uintptr(h), filepath.Clean(path)), nil
+	return &File{f: os.NewFile(uintptr(h), filepath.Clean(path))}, nil
 }
 
 // Canonical returns the real path of an existing folder or file: links in the path are
@@ -477,3 +477,15 @@ func fileTime(ft windows.Filetime) time.Time {
 	}
 	return time.Unix(0, int64(d)*100)
 }
+
+// File is a user file opened for reading. It deliberately has no Write, Truncate, Chmod
+// or similar methods (plan I-1): code that tries to change a user file does not compile.
+// (The handle is GENERIC_READ too, so Windows would refuse anyway.)
+type File struct{ f *os.File }
+
+func (r *File) Read(p []byte) (int, error)                   { return r.f.Read(p) }
+func (r *File) ReadAt(p []byte, off int64) (int, error)      { return r.f.ReadAt(p, off) }
+func (r *File) Seek(offset int64, whence int) (int64, error) { return r.f.Seek(offset, whence) }
+func (r *File) Stat() (os.FileInfo, error)                   { return r.f.Stat() }
+func (r *File) Name() string                                 { return r.f.Name() }
+func (r *File) Close() error                                 { return r.f.Close() }

@@ -132,6 +132,12 @@ func (ix *Indexer) IndexRoot(ctx context.Context, root store.Root) (Stats, error
 		return st, err
 	}
 
+	// Files skipped earlier by the free-tier limit are queued again only when they can
+	// actually be indexed (license, or free slots), not re-written on every scan.
+	if err := ix.queueSkipped(ctx, root.ID, now, &jobs); err != nil {
+		return st, err
+	}
+
 	// 3. Index changed files, most important first.
 	sort.SliceStable(jobs, func(i, j int) bool { return jobs[i].prio < jobs[j].prio })
 	err = ix.run(ctx, root.Path, jobs, &st)
@@ -484,4 +490,36 @@ func (ix *Indexer) now() time.Time {
 		return ix.Now()
 	}
 	return time.Now()
+}
+
+// queueSkipped adds files that were skipped by the free-tier limit, as many as there is
+// room for now (all of them with a license).
+func (ix *Indexer) queueSkipped(ctx context.Context, rootID int64, now time.Time, jobs *[]job) error {
+	room := 1 << 30
+	if ix.Licensed == nil || !ix.Licensed() {
+		used, err := ix.Store.CountContentIndexed(ctx)
+		if err != nil {
+			return err
+		}
+		room = FreeLimit - used
+	}
+	if room <= 0 {
+		return nil
+	}
+	skipped, err := ix.Store.SkippedFiles(ctx, rootID, room)
+	if err != nil {
+		return err
+	}
+	queued := make(map[int64]bool, len(*jobs))
+	for _, j := range *jobs {
+		queued[j.id] = true
+	}
+	for _, f := range skipped {
+		if queued[f.ID] {
+			continue
+		}
+		sf := scan.File{Path: f.Path, Name: f.Name, Ext: f.Ext, Kind: f.Kind, Size: f.Size, ModTime: f.MTime}
+		*jobs = append(*jobs, job{id: f.ID, file: sf, prio: priority(sf, now)})
+	}
+	return nil
 }

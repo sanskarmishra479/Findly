@@ -188,3 +188,14 @@ Three parallel review agents covered the whole phase; 8 High findings, all confi
   - Secrets: `mnemonic` only counts together with seed/wallet/phrase/crypto words ("Mnemonics for Biology.pdf" was skipped); recovery/backup-code names match with spaces, `-` or `_`.
   - `cli`: the damaged-index hint is printed once.
   - Accepted (low impact): when one request's input crashes the server, a concurrent request (e.g. a search during indexing) can also get `ErrCrashed`; indexing uses one embed worker, and a search just retries.
+
+## Phase 1 full review — Medium fixes (2026-10-12)
+- **Hindi/Indic search (#9):** `search.words` keeps combining marks inside words (Devanagari vowel signs are marks); "किराया" was split into letters joined by AND and matched almost any Hindi text. Tested: SQLite's tokenizer already matches a whole quoted word precisely, so no index change was needed; accented Latin is unaffected.
+- **Cancel ≠ server failure (#10):** done with the High fixes.
+- **Skipped files (#11):** `UpsertFile` no longer re-offers unchanged free-tier-skipped files on every scan (a write per file per rescan); `store.SkippedFiles` + `index.queueSkipped` queue them only when a license or free slots exist.
+- **CLI (#12):** `cli index` accepts relative folders; flags after the query are an error (Go's flag parsing stops at the first non-flag, so `-n 1` became search words); `-n < 1` and unknown `-kind` values are refused.
+- **Phrases / exact boost (#13):** checked on the full passage text (not the 200-char snippet), with whole, normalized words; quoted parts also earn the exact boost (plan 9.11).
+- **Model version (#14):** `store.EnsureModel` writes `model_version` (`embed.ModelVersion`), `vector_dim`, `created_at` to meta on first use and returns `ErrModelChanged` for a different model; the CLI checks it whenever the model starts.
+- **Timeout (#15):** per-request timeout 1 min + 1 min per input (was a fixed 5 min for 16 passages).
+- **Secret roots (#16):** `scan.Root` refuses a chosen folder that is, or is inside, a credentials folder (`.ssh`, `.aws`, …) or a folder named with the words password(s)/secret(s)/credential(s) (`ErrSecretRoot`). Whole words only for path parts (substring rules hit e.g. "TestScanSkipsSecrets123"); folders inside AppData remain allowed.
+- **Read-only type (#17):** `safefs.Open` returns `*safefs.File` (Read/ReadAt/Seek/Stat/Name/Close only), so code that writes to a user file does not compile.

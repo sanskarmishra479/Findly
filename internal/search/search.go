@@ -49,6 +49,7 @@ type Result struct {
 	ItemID  int64   // best matching item (0 for a file-name-only match)
 	Locator Locator // where in the file
 	Snippet string
+	text    string // full text of the best item, for exact-match checks (not shown)
 	Score   float64
 	Keyword bool // found by the keyword path
 	Meaning bool // found by the semantic path
@@ -106,7 +107,7 @@ func (s *Searcher) Keyword(ctx context.Context, raw string, fl store.Filter, typ
 			continue
 		}
 		h := best[id]
-		r := Result{File: f, Keyword: true, Snippet: snippet(h.Text, q)}
+		r := Result{File: f, Keyword: true, Snippet: snippet(h.Text, q), text: h.Text}
 		if h.Kind != store.ItemName {
 			r.ItemID = h.ItemID
 			r.Locator = parseLocator(h.Locator)
@@ -160,7 +161,7 @@ func (s *Searcher) Semantic(ctx context.Context, raw string, fl store.Filter) ([
 		}
 		out = append(out, Result{
 			File: f, ItemID: c.ItemID, Locator: parseLocator(loc),
-			Snippet: snippet(text, q), Score: float64(c.Score), Meaning: true,
+			Snippet: snippet(text, q), text: text, Score: float64(c.Score), Meaning: true,
 		})
 		if len(out) == ResultLimit {
 			break
@@ -194,7 +195,7 @@ func Fuse(q Query, keyword, semantic []Result) []Result {
 				m.Keyword = m.Keyword || r.Keyword
 				m.Meaning = m.Meaning || r.Meaning
 				if m.ItemID == 0 && r.ItemID != 0 { // prefer a content location over a name match
-					m.ItemID, m.Locator, m.Snippet = r.ItemID, r.Locator, r.Snippet
+					m.ItemID, m.Locator, m.Snippet, m.text = r.ItemID, r.Locator, r.Snippet, r.text
 				}
 				continue
 			}
@@ -207,24 +208,31 @@ func Fuse(q Query, keyword, semantic []Result) []Result {
 	add(keyword)
 	add(semantic)
 
-	exact := strings.ToLower(strings.Join(q.Words, " "))
+	exact := strings.Join(q.Words, " ")
 	var out []Result
 	for _, id := range order {
 		r := merged[id]
-		hay := strings.ToLower(r.File.Name + "\n" + r.Snippet)
-		if len(q.Phrases) > 0 {
-			ok := true
-			for _, p := range q.Phrases {
-				if !strings.Contains(normalize(hay), normalize(strings.ToLower(p))) && !r.Keyword {
-					ok = false
-				}
-			}
-			if !ok {
-				continue // semantic-only hit without the required exact phrase
+		// The whole passage (not just the 200-character snippet) and the file name, as
+		// space-padded normalized words: "cat" matches "cat" but not "cats" or
+		// "concatenate"; "INV-2024" matches "inv 2024".
+		hay := " " + normalize(strings.ToLower(r.File.Name+"\n"+r.text)) + " "
+		has := func(s string) bool {
+			n := normalize(strings.ToLower(s))
+			return n != "" && strings.Contains(hay, " "+n+" ")
+		}
+		phrasesOK := true
+		for _, p := range q.Phrases {
+			if !has(p) {
+				phrasesOK = false
 			}
 		}
-		// Whole words only: "cat" must not boost "concatenate".
-		if exact != "" && strings.Contains(" "+normalize(hay)+" ", " "+normalize(exact)+" ") {
+		// Keyword hits already matched the phrases in the index; a meaning-only hit must
+		// contain every quoted phrase itself.
+		if !phrasesOK && !r.Keyword {
+			continue
+		}
+		// Exact boost: the whole query, or (plan 9.11) its quoted parts, appear verbatim.
+		if (exact != "" && has(exact)) || (len(q.Phrases) > 0 && phrasesOK) {
 			r.Exact = true
 			r.Score += exactBoost
 		}

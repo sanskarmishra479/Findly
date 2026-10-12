@@ -89,7 +89,8 @@ func (en *engine) startEmbedder(ctx context.Context, e engineFlags, lowPriority 
 		return err
 	}
 	en.emb = srv
-	return nil
+	// Vectors from different models must never be mixed in one index.
+	return en.store.EnsureModel(ctx, embed.ModelVersion)
 }
 
 func (en *engine) close() {

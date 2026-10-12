@@ -154,6 +154,10 @@ type Options struct {
 // purging the index for an unplugged USB drive would lose everything indexed from it.
 var ErrBadRoot = errors.New("scan: root folder is not available")
 
+// ErrSecretRoot is returned for a chosen folder that is, or is inside, a credentials
+// folder (.ssh, .aws, "Passwords", …): its files must never be read (P-6).
+var ErrSecretRoot = errors.New("scan: this folder holds keys or passwords and is never indexed")
+
 // Root scans one chosen folder and calls fn for every file to index. fn may return an
 // error to stop the scan. Scanning stops early if ctx is cancelled. root must be a real
 // path (safefs.Canonical); unreadable subfolders are counted in Stats.Errors and skipped.
@@ -170,6 +174,9 @@ func Root(ctx context.Context, root string, opts Options, fn func(File) error) (
 		return s.stats, fmt.Errorf("%w: %v", ErrBadRoot, err)
 	case !info.IsDir(), info.IsLink(), info.IsCloudOnly():
 		return s.stats, fmt.Errorf("%w: %s is not a real local folder", ErrBadRoot, root)
+	}
+	if SecretFolder(root) {
+		return s.stats, fmt.Errorf("%w: %s", ErrSecretRoot, root)
 	}
 	entries, err := safefs.ReadDir(root)
 	if err != nil {
@@ -322,6 +329,43 @@ func codesOrSeed(n string) bool {
 			if strings.Contains(w, k) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// credentialDirs are skipDirs entries that hold secrets (not merely junk such as
+// node_modules or AppData, which a user may choose on purpose).
+var credentialDirs = map[string]bool{
+	".ssh": true, ".gnupg": true, ".aws": true, ".azure": true, ".kube": true, ".docker": true,
+	".password-store": true, ".terraform": true,
+}
+
+// SecretFolder reports whether path is, or is inside, a credentials folder: the checks
+// for children also apply to every part of a folder the user picks directly.
+func SecretFolder(path string) bool {
+	vol := filepath.VolumeName(path)
+	for _, part := range strings.Split(strings.TrimPrefix(filepath.Clean(path), vol), `\`) {
+		if part == "" {
+			continue
+		}
+		if credentialDirs[strings.ToLower(part)] || secretWords(part) {
+			return true
+		}
+	}
+	return false
+}
+
+// secretWords matches folder names made of words like "passwords", "secrets",
+// "credentials" ("My Passwords", "old_credentials"). Whole words only: substring rules on
+// every part of a path matched unrelated folders such as "TestScanSkipsSecrets123".
+func secretWords(name string) bool {
+	for _, w := range strings.FieldsFunc(strings.ToLower(name), func(r rune) bool {
+		return r == ' ' || r == '_' || r == '-' || r == '.'
+	}) {
+		switch w {
+		case "password", "passwords", "secret", "secrets", "credential", "credentials":
+			return true
 		}
 	}
 	return false

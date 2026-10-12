@@ -56,11 +56,14 @@ func Parse(raw string) (q Query) {
 	return q
 }
 
-// words keeps runs of letters and digits; everything else separates words. This matches
-// how FTS5's unicode61 tokenizer splits text, and drops every FTS5 operator character.
+// words keeps runs of letters, digits and combining marks; everything else separates
+// words, which drops every FTS5 operator character. Marks must stay inside the word:
+// Devanagari vowel signs are marks, and splitting at them turned "किराया" (rent) into
+// single letters joined by AND, which matched almost any Hindi text. Kept whole and
+// quoted, FTS5 matches the word as a phrase of its own tokens, which is precise.
 func words(s string) []string {
 	return strings.FieldsFunc(s, func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && !unicode.IsMark(r)
 	})
 }
 

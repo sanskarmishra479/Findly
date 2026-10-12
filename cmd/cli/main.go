@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -41,6 +42,9 @@ func main() {
 
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
+		if errors.Is(err, store.ErrModelChanged) {
+			fmt.Fprintln(os.Stderr, "This version uses a different model. Run \"cli reset\", then index your folders again.")
+		}
 		if store.IsCorrupt(err) {
 			fmt.Fprintln(os.Stderr, "The index is damaged (your files are not affected). Run \"cli reset\", then index your folders again.")
 		}

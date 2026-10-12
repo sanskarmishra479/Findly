@@ -392,3 +392,46 @@ func BenchmarkNearestFolderFilter100k(b *testing.B) {
 		c.Nearest(&qv, Candidates, fl)
 	}
 }
+
+// Medium #13: quoted phrases and the exact boost use whole words on the full passage.
+func TestFusePhraseWholeWordsFullText(t *testing.T) {
+	long := strings.Repeat("filler text here. ", 40) + "the brake pads were replaced"
+	mk := func(id int64, name, text string, kw bool) Result {
+		return Result{File: store.File{ID: id, Name: name}, text: text, Snippet: snippet(text, Parse("x")), Keyword: kw, Meaning: !kw}
+	}
+	// Meaning-only hit containing "cats" must not satisfy the phrase "cat".
+	out := Fuse(Parse(`"cat"`), nil, []Result{mk(1, "lease.pdf", "no dogs or cats allowed", false)})
+	if len(out) != 0 {
+		t.Errorf(`"cat" kept a result that only says "cats"`)
+	}
+	// The phrase far outside the snippet window still counts, and earns the exact boost.
+	out = Fuse(Parse(`"brake pads"`), nil, []Result{mk(2, "car.txt", long, false)})
+	if len(out) != 1 || !out[0].Exact {
+		t.Errorf("phrase beyond the snippet not found: %+v", out)
+	}
+	// One-word query: "cat" must not boost "concatenate".
+	out = Fuse(Parse("cat"), []Result{mk(3, "x.txt", "concatenate strings", true)}, nil)
+	if len(out) != 1 || out[0].Exact {
+		t.Errorf("exact boost on a partial word: %+v", out)
+	}
+}
+
+// Medium #9: Hindi words are searched as whole words, not as single letters.
+func TestHindiWordsAreNotSplitIntoLetters(t *testing.T) {
+	if q := Parse("किराया"); len(q.Words) != 1 {
+		t.Fatalf("किराया parsed as %d words: %q", len(q.Words), q.Words)
+	}
+	fx := newFixture(t)
+	fx.add(t, `C:\Docs\hindi.txt`, "text", time.Now(), map[string]int{"इस साल मानसून जून में आया। किसानों के लिए अच्छी खबर": -1})
+	s := fx.searcher(t, nil)
+	ctx := context.Background()
+	if rs, _ := s.Keyword(ctx, "किराया", store.Filter{}, false); len(rs) != 0 {
+		t.Errorf("'rent' matched a text without it: %v", names(rs))
+	}
+	if rs, _ := s.Keyword(ctx, "मानसून", store.Filter{}, false); len(rs) != 1 {
+		t.Errorf("'monsoon' not found: %v", names(rs))
+	}
+	if rs, _ := s.Keyword(ctx, "café", store.Filter{}, false); len(rs) != 0 {
+		t.Errorf("unexpected match: %v", names(rs))
+	}
+}

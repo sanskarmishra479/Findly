@@ -530,3 +530,22 @@ func TestUnreadableFolderNonASCIIName(t *testing.T) {
 		t.Fatalf("purged %d files from an unreadable folder", st.Deleted)
 	}
 }
+
+// Medium #11: at the free limit, skipped files are not re-queued (no work, no writes) on
+// every rescan; they are picked up after a license.
+func TestSkippedFilesNotRequeuedAtLimit(t *testing.T) {
+	e := newEnv(t)
+	for i := range FreeLimit + 20 {
+		e.write(fmt.Sprintf("f/%03d.txt", i), fmt.Sprintf("document %d words %d", i, i*3))
+	}
+	e.run()
+	var last Progress
+	e.ix.OnProgress = func(p Progress) { last = p }
+	if st := e.run(); st.Skipped != 0 || last.Total != 0 {
+		t.Fatalf("rescan at the limit did work: stats %+v progress %+v", st, last)
+	}
+	e.ix.Licensed = func() bool { return true }
+	if st := e.run(); st.Indexed != 20 {
+		t.Fatalf("after license: Indexed = %d, want 20", st.Indexed)
+	}
+}
