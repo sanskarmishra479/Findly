@@ -28,7 +28,9 @@
 - [x] T10 file-integrity test (`go test ./internal/integrity`)
 - [x] Full Phase 1 review: all High and Medium findings fixed and re-reviewed (see docs/decisions.md)
 - [x] Low findings
-- [ ] Acceptance test on a real Documents folder (needs the user's OK)
+- [x] Acceptance test on a real Documents folder (2026-10-12, see docs/decisions.md)
+
+**Phase 1 complete.**
 
 ## Notes for later phases
 - Phase 4: deferred job for partial PDFs (pages after 30); needs a `last_page` column (new migration).

@@ -242,3 +242,14 @@ Three parallel review agents covered the whole phase; 8 High findings, all confi
   - `dayStart` gives up after one day of steps, so a day a zone skipped entirely (Samoa 2011-12-30) is an error instead of an endless loop.
   - Parent folder names with no lower-case letters ("MYSECRETS", "TOPSECRET") use the substring rule, because case shows no word boundaries there.
   - Accepted: an all-lower-case parent like `mysecrets` is allowed as a parent, although a scan of its own parent would skip it. This is the price of not blocking user names like "secretagent".
+
+## Phase 1 acceptance (2026-10-12)
+Real folder: `C:\Users\sansk\OneDrive\Documents` (user's OK), Vulkan, separate test data folder (deleted afterwards because it held document text).
+- **Index:** 17 files. 7 cloud-only files were skipped (not downloaded), desktop.ini was skipped, and 9 were found (7 PDFs, 1 docx, 1 png pending for Phase 2). 8 files indexed, 0 failed, 357 passages, 2 min 14 s. All 7 PDFs are over 30 pages, so they are `partial` (the remaining pages are the Phase 4 deferred job).
+- **Search:** meaning queries ("work experience and skills" found the resume first; "what technologies were used to build the system" found the architecture page) and keyword queries ("abstract": words+meaning+exact) worked in 87–103 ms with the model warm.
+- **Integrity:** the metadata snapshot (size, modified, created, attributes, for 18 entries) was identical before and after; cloud-only files stayed cloud-only. Nothing was written outside the data folder.
+- **Evals:** Recall@5 1.000 (target ≥ 0.8), MRR@10 0.976. All unit tests and the file-integrity test pass.
+- **Found for later phases:**
+  - Duplicate copies (5 identical reports) fill the result list; the UI should group identical files (same content hash).
+  - "Conclusion and future scope" found the table of contents, because the real conclusion lies past page 30 (deferred pages).
+  - 2 min 14 s for ~150 unique passages seems slow; profile PDF extraction versus embedding before Phase 3.
