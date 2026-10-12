@@ -34,6 +34,9 @@ func runCompare(args []string) error {
 		if !ok {
 			return fmt.Errorf("%s missing from %s", name, args[1])
 		}
+		if len(v) != len(ref[name]) { // vectors from different settings or a damaged file
+			return fmt.Errorf("%s: %d values in %s but %d in %s", name, len(ref[name]), args[0], len(v), args[1])
+		}
 		c := cosine(ref[name], v)
 		worst = min(worst, c)
 		fmt.Printf("  %-12s %.6f\n", name, c)

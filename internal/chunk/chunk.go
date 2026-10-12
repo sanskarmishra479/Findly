@@ -16,7 +16,8 @@ import (
 const (
 	Target  = 1400 // ≈ 350 English tokens
 	Overlap = 200  // ≈ 50 English tokens
-	// Max is a hard upper bound for one passage, separators included.
+	// Max is the size no passage may exceed, checked by the tests. splitText never builds
+	// a passage over Target (long sentences are cut into pieces first); Max is a margin.
 	Max = 2000
 )
 
@@ -45,8 +46,8 @@ func Split(sections []Section) []Chunk {
 	return out
 }
 
-// splitText packs units (sentences or shorter pieces) into passages of about Target
-// characters, starting each new passage with about Overlap characters from the end of
+// splitText packs units (sentences or shorter pieces) into passages of at most Target
+// bytes, starting each new passage with about Overlap bytes from the end of
 // the previous one.
 func splitText(text string) []string {
 	units := units(text)
@@ -68,7 +69,7 @@ func splitText(text string) []string {
 		if end == len(units) {
 			break
 		}
-		// Step back over trailing units worth at most Overlap characters, but always
+		// Step back over trailing units worth at most Overlap bytes, but always
 		// move forward by at least one unit so the loop ends.
 		next, back := end, 0
 		for next-1 > start && back+units[next-1].n+sepLen(units[next-1]) <= Overlap {

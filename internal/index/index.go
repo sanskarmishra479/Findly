@@ -324,7 +324,7 @@ func (ix *Indexer) run(ctx context.Context, rootPath string, jobs []job, st *Sta
 		if runErr != nil {
 			continue // draining after a fatal error so the workers can exit
 		}
-		status, err := ix.store(ctx, r, tier, &crashes)
+		status, err := ix.save(ctx, r, tier, &crashes)
 		if err != nil {
 			runErr = err
 			cancel()
@@ -340,12 +340,13 @@ func (ix *Indexer) run(ctx context.Context, rootPath string, jobs []job, st *Sta
 
 var errOverLimit = errors.New("free version limit reached")
 
-// store handles one extracted file and returns the status it recorded.
 // maxCrashFiles: if this many files in a row crash the embedding server, the server
 // itself is broken (not the files), so the run stops instead of failing every file.
 const maxCrashFiles = 3
 
-func (ix *Indexer) store(ctx context.Context, r extracted, tier *freeTier, crashes *int) (string, error) {
+// save embeds and stores one extracted file and returns the status it recorded. (Not
+// named "store": that is the package it writes to.)
+func (ix *Indexer) save(ctx context.Context, r extracted, tier *freeTier, crashes *int) (string, error) {
 	id := r.job.id
 	set := func(status, hash, msg string) (string, error) {
 		return status, ix.Store.SetFileResult(ctx, id, status, "", hash, msg)

@@ -979,7 +979,11 @@ func (s *Store) Count(ctx context.Context) (Counts, error) {
 			}
 			q.m[k] = n
 		}
+		err = rows.Err() // an error that ended the loop early
 		rows.Close()
+		if err != nil {
+			return c, err
+		}
 	}
 	return c, nil
 }

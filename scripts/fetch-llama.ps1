@@ -1,5 +1,5 @@
 # Downloads the pinned llama.cpp Windows builds (CPU + Vulkan) into third_party\llama\<variant>\
-# and verifies their SHA-256. Safe to re-run: verified downloads are skipped.
+# and verifies their SHA-256. Safe to re-run: verified installs are skipped.
 $ErrorActionPreference = 'Stop'
 
 $Tag = 'b11552'
@@ -12,11 +12,14 @@ $Root = Join-Path $PSScriptRoot '..\third_party\llama' | ForEach-Object { [IO.Pa
 New-Item -ItemType Directory -Force $Root | Out-Null
 
 foreach ($b in $Builds) {
-    $zip  = Join-Path $Root $b.File
-    $dest = Join-Path $Root $b.Variant
-    $url  = "https://github.com/ggml-org/llama.cpp/releases/download/$Tag/$($b.File)"
+    $zip    = Join-Path $Root $b.File
+    $dest   = Join-Path $Root $b.Variant
+    $marker = Join-Path $dest '.verified'
+    $url    = "https://github.com/ggml-org/llama.cpp/releases/download/$Tag/$($b.File)"
 
-    if (Test-Path (Join-Path $dest 'llama-server.exe')) {
+    # The marker holds the hash of the zip the folder was extracted from. It is written
+    # last, so an interrupted extract (or an older build) is never mistaken for a good one.
+    if ((Test-Path $marker) -and ((Get-Content $marker -Raw).Trim() -eq $b.Sha256)) {
         Write-Host "[$($b.Variant)] already present, skipping"
         continue
     }
@@ -29,7 +32,14 @@ foreach ($b in $Builds) {
         Remove-Item $zip -Force
         throw "[$($b.Variant)] SHA-256 mismatch: got $hash, want $($b.Sha256)"
     }
-    Expand-Archive -Path $zip -DestinationPath $dest -Force
+    # Extract next to the target, then swap it in, so $dest is either the old install or
+    # a complete new one.
+    $partial = "$dest.partial"
+    if (Test-Path $partial) { Remove-Item $partial -Recurse -Force }
+    Expand-Archive -Path $zip -DestinationPath $partial
+    Set-Content -Path (Join-Path $partial '.verified') -Value $b.Sha256 -Encoding ascii
+    if (Test-Path $dest) { Remove-Item $dest -Recurse -Force }
+    Move-Item $partial $dest
     Remove-Item $zip -Force
     Write-Host "[$($b.Variant)] ok -> $dest"
 }

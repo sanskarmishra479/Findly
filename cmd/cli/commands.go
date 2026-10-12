@@ -98,6 +98,8 @@ func runSearch(args []string) error {
 	kinds := fs.String("kind", "", "only these kinds, comma-separated: text,doc,pdf,image,audio,video")
 	folder := fs.String("folder", "", "only files under this folder")
 	limit := fs.Int("n", 10, "results to show")
+	after := fs.String("after", "", "only files modified on or after this date (YYYY-MM-DD)")
+	before := fs.String("before", "", "only files modified before this date (YYYY-MM-DD)")
 	fs.Parse(args)
 	if fs.NArg() == 0 {
 		return errors.New(`usage: cli search [flags] "<query>"`)
@@ -120,6 +122,25 @@ func runSearch(args []string) error {
 			return fmt.Errorf("unknown -kind %q (use text, doc, pdf, image, audio, video, other)", k)
 		}
 	}
+	var fl store.Filter
+	// Dates are local days: -after 2025-03-01 starts at midnight here, not in UTC.
+	for _, d := range []struct {
+		name, val string
+		dst       *int64
+	}{{"after", *after, &fl.After}, {"before", *before, &fl.Before}} {
+		if d.val == "" {
+			continue
+		}
+		t, err := time.ParseInLocation("2006-01-02", d.val, time.Local)
+		// UnixNano only covers 1678–2262; outside that it returns nonsense.
+		if err != nil || t.Year() < 1970 || t.Year() > 2200 {
+			return fmt.Errorf("-%s %q: use a date like 2025-03-31", d.name, d.val)
+		}
+		*d.dst = t.UnixNano()
+	}
+	if fl.After != 0 && fl.Before != 0 && fl.Before <= fl.After {
+		return errors.New("-before must be later than -after")
+	}
 
 	en, err := openEngine(ef)
 	if err != nil {
@@ -139,7 +160,6 @@ func runSearch(args []string) error {
 			return err
 		}
 	}
-	var fl store.Filter
 	if *folder != "" {
 		if fl.Folder, err = absFolder(*folder); err != nil {
 			return err

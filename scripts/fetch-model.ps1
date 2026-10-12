@@ -14,10 +14,15 @@ New-Item -ItemType Directory -Force $Root | Out-Null
 foreach ($f in $Files) {
     $out = Join-Path $Root $f.File
     $tmp = "$out.download"
-    if ((Test-Path $out) -and (Get-Item $out).Length -eq $f.Size) {
-        Write-Host "$($f.File) already present, skipping"
+    # Hash the existing file too (a few seconds): a matching size alone does not prove a
+    # good file.
+    if ((Test-Path $out) -and (Get-Item $out).Length -eq $f.Size -and
+        (Get-FileHash $out -Algorithm SHA256).Hash.ToLower() -eq $f.Sha256) {
+        Write-Host "$($f.File) already present and verified, skipping"
         continue
     }
+    # resolve/main follows the repo's latest commit. If upstream changes a file, the hash
+    # check below fails safely instead of installing an unknown model.
     $url = "https://huggingface.co/$Repo/resolve/main/$($f.File)"
     Write-Host "downloading $url ($([math]::Round($f.Size / 1MB)) MB)"
     # curl.exe ships with Windows 10+; -C - resumes a partial download.

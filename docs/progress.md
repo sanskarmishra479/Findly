@@ -23,10 +23,13 @@
 - [x] T5 `chunk`, `embed`, `vecfmt` (+ `sidecar`)
 - [x] T6 `index` (pipeline, priorities, dedupe, deletions, free tier)
 - [x] T7 `search` (keyword + semantic + RRF + exact boost, filters)
+- [x] T8 CLI index/search/stats/remove (+ `check`, `reset`; `-kind`, `-folder`, `-after`, `-before`)
+- [x] T9 evals (28-file testbed, 46 queries incl. paraphrases, multi-answer and "should find nothing"; `cli eval` with cutoff/gap sweep). Chosen cutoff 0.64 + gap 0.06 (Vulkan, 2026-10-12): Recall@5 = 1.000, MRR@10 = 0.976, results in `evals/results/`
+- [x] T10 file-integrity test (`go test ./internal/integrity`)
+- [x] Full Phase 1 review: all High and Medium findings fixed and re-reviewed (see docs/decisions.md)
+- [ ] Low findings
+- [ ] Acceptance test on a real Documents folder (needs the user's OK)
 
 ## Notes for later phases
 - Phase 4: deferred job for partial PDFs (pages after 30); needs a `last_page` column (new migration).
-
-- [x] T8 CLI index/search/stats/remove
-- [x] T9 evals (26-file testbed, 31 queries, `cli eval`; Recall@5 = 1.000, MRR@10 = 1.000)
-- [x] T10 file-integrity test (`go test ./internal/integrity`)
+- Existing llama.cpp installs have no `.verified` marker yet: the next `scripts\fetch-llama.ps1` run downloads them once more (≈53 MB).

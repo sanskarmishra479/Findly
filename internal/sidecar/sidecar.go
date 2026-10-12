@@ -9,7 +9,6 @@
 package sidecar
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -175,9 +174,6 @@ func (t *Tail) String() string {
 	defer t.mu.Unlock()
 	return string(t.buf)
 }
-
-// ErrExited is returned when an operation needs a process that has exited.
-var ErrExited = errors.New("sidecar: process exited")
 
 // Note: a child could start its own children before AssignProcessToJobObject runs; those
 // would escape the job. llama-server starts none. If a future helper does, start it

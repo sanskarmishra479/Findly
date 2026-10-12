@@ -33,14 +33,15 @@ type spikeInput struct {
 func runSpike(args []string) error {
 	fs := flag.NewFlagSet("spike", flag.ExitOnError)
 	backend := fs.String("backend", "cpu", "llama.cpp build to use: cpu | vulkan")
-	dataDir := fs.String("data", `testdata\spike`, "folder with the test photos and audio")
+	// Not "-data": in every other command that is the app data folder.
+	mediaDir := fs.String("media", `testdata\spike`, "folder with the test photos and audio")
 	out := fs.String("out", "", "optional: write the 256-d vectors as JSON to this file")
 	imgTokens := fs.Int("image-tokens", 0, "image token budget (70..1120); 0 = model default")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	dog, cat, audio, err := findSpikeFiles(*dataDir)
+	dog, cat, audio, err := findSpikeFiles(*mediaDir)
 	if err != nil {
 		return err
 	}
