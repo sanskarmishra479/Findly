@@ -237,3 +237,8 @@ Three parallel review agents covered the whole phase; 8 High findings, all confi
 - **Parent folders:** "secret" must be a word of its own (`My Secrets`, `MySecrets`, `old_secret`), so `C:\Users\secretagent` and "Secretion studies" don't block everything below them. The chosen folder itself keeps the substring rule.
 - **Date filters:** `dayStart` moves a missing local midnight (DST zones that jump at 00:00) to the first real moment of the day. 1970-01-01 UTC no longer turns into "no filter".
 - **`cli compare`:** real cosine (divides by the norms), and a reference with no vectors is refused.
+- **Follow-up (narrow review):**
+  - fetch-llama.ps1 renames the old install back if moving the new one into place fails (e.g. antivirus holding a new file open). Tested with a locked file.
+  - `dayStart` gives up after one day of steps, so a day a zone skipped entirely (Samoa 2011-12-30) is an error instead of an endless loop.
+  - Parent folder names with no lower-case letters ("MYSECRETS", "TOPSECRET") use the substring rule, because case shows no word boundaries there.
+  - Accepted: an all-lower-case parent like `mysecrets` is allowed as a parent, although a scan of its own parent would skip it. This is the price of not blocking user names like "secretagent".

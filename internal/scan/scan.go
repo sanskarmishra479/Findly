@@ -401,8 +401,10 @@ func SecretFolder(path string) bool {
 func secretWordIn(name string) bool {
 	rs := []rune(name)
 	lower := []rune(strings.ToLower(name))
-	if len(lower) != len(rs) {
-		return containsSecret(strings.ToLower(name)) // unusual case mapping: stay strict
+	// Without lower-case letters ("MYSECRETS", "TOPSECRET") case shows no word
+	// boundaries; and unusual case mappings change lengths. Stay strict in both cases.
+	if len(lower) != len(rs) || !strings.ContainsFunc(name, unicode.IsLower) {
+		return containsSecret(strings.ToLower(name))
 	}
 	w := []rune("secret")
 	for i := 0; i+len(w) <= len(lower); i++ {

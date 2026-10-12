@@ -364,7 +364,12 @@ func dayStart(day string, loc *time.Location) (int64, error) {
 	}
 	// Where clocks jump at midnight (some DST zones), Go returns a time on the day
 	// before; move to the first moment that is really on the requested day.
-	for t.Format("2006-01-02") != day {
+	// At most a day of steps: a zone that skipped the whole day (Samoa, 2011-12-30) has
+	// no such day.
+	for i := 0; t.Format("2006-01-02") != day; i++ {
+		if i == 24*4 {
+			return 0, errors.New("this day does not exist in the local time zone")
+		}
 		t = t.Add(15 * time.Minute)
 	}
 	return max(t.UnixNano(), 1), nil

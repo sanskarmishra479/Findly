@@ -385,3 +385,15 @@ func TestPrivateParentsNeedWholeWord(t *testing.T) {
 		}
 	}
 }
+
+// Narrow review: all-caps names show no word boundaries, so the substring rule applies.
+func TestPrivateParentsAllCaps(t *testing.T) {
+	for _, p := range []string{`D:\MYSECRETS\bank`, `D:\TOPSECRET\x`} {
+		if !SecretFolder(p) {
+			t.Errorf("%s allowed", p)
+		}
+	}
+	if SecretFolder(`D:\SECRETARY\x`) {
+		t.Error(`D:\SECRETARY\x refused`)
+	}
+}

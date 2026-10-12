@@ -45,7 +45,13 @@ foreach ($b in $Builds) {
     Set-Content -Path (Join-Path $partial '.verified') -Value $b.Sha256 -Encoding ascii
     if (Test-Path $old) { throw "[$($b.Variant)] $old is still in use; stop llama-server and run again" }
     if (Test-Path $dest) { Rename-Item $dest (Split-Path $old -Leaf) }
-    Rename-Item $partial (Split-Path $dest -Leaf)
+    try {
+        Rename-Item $partial (Split-Path $dest -Leaf)
+    } catch {
+        # e.g. antivirus holding a new file open: put the old install back.
+        if ((Test-Path $old) -and -not (Test-Path $dest)) { Rename-Item $old (Split-Path $dest -Leaf) }
+        throw
+    }
     Remove-Item $old -Recurse -Force -ErrorAction SilentlyContinue # retried on the next run
     Remove-Item $zip -Force
     Write-Host "[$($b.Variant)] ok -> $dest"

@@ -21,6 +21,11 @@ func TestDayStart(t *testing.T) {
 	if ns, _ := dayStart("1970-01-01", time.UTC); ns != 1 {
 		t.Errorf("1970-01-01 UTC = %d, want 1 (0 means no filter)", ns)
 	}
+	if apia, err := time.LoadLocation("Pacific/Apia"); err == nil {
+		if _, err := dayStart("2011-12-30", apia); err == nil { // Samoa skipped this day
+			t.Error("a skipped day was accepted")
+		}
+	}
 	for _, bad := range []string{"2025-02-30", "2025-3-1", "1969-12-31", "2201-01-01", "yesterday"} {
 		if _, err := dayStart(bad, time.UTC); err == nil {
 			t.Errorf("%q accepted", bad)
