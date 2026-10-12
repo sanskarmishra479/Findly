@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/sanskarmishra479/findly/internal/embed"
@@ -218,7 +219,15 @@ func Fuse(q Query, keyword, semantic []Result) []Result {
 		hay := " " + normalize(strings.ToLower(r.File.Name+"\n"+r.text)) + " "
 		has := func(s string) bool {
 			n := normalize(strings.ToLower(s))
-			return n != "" && strings.Contains(hay, " "+n+" ")
+			if n == "" {
+				return false
+			}
+			// Chinese, Japanese and Thai write without spaces, so a whole sentence is one
+			// "word" and a whole-word check would never match inside it.
+			if spaceless(n) {
+				return strings.Contains(hay, n)
+			}
+			return strings.Contains(hay, " "+n+" ")
 		}
 		phrasesOK := true
 		for _, p := range q.Phrases {
@@ -243,6 +252,18 @@ func Fuse(q Query, keyword, semantic []Result) []Result {
 		out = out[:ResultLimit]
 	}
 	return out
+}
+
+// spaceless reports whether s contains letters of a script written without spaces
+// between words.
+func spaceless(s string) bool {
+	for _, r := range s {
+		if unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Thai,
+			unicode.Lao, unicode.Khmer, unicode.Myanmar) {
+			return true
+		}
+	}
+	return false
 }
 
 // normalize collapses punctuation to spaces so "INV-2024-001" matches "inv 2024 001".

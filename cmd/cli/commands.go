@@ -51,11 +51,6 @@ func runIndex(args []string) error {
 	if err := en.startEmbedder(ctx, ef, true); err != nil {
 		return err
 	}
-	root, err := en.store.AddRoot(ctx, folder)
-	if err != nil {
-		return err
-	}
-
 	ix := &index.Indexer{
 		Store:    en.store,
 		Embedder: en.emb,
@@ -63,6 +58,10 @@ func runIndex(args []string) error {
 		OnProgress: func(p index.Progress) {
 			fmt.Fprintf(os.Stderr, "\rindexing %d / %d  (failed %d, over free limit %d)   ", p.Done, p.Total, p.Failed, p.Skipped)
 		},
+	}
+	root, err := ix.AddRoot(ctx, folder)
+	if err != nil {
+		return err
 	}
 	start := time.Now()
 	st, err := ix.IndexRoot(ctx, root)
@@ -99,9 +98,12 @@ func runSearch(args []string) error {
 	}
 	// Go's flag package stops at the first non-flag argument, so in
 	// `cli search "rent due" -n 1` the "-n 1" would silently become search words.
-	for _, a := range fs.Args()[1:] {
-		if strings.HasPrefix(a, "-") {
-			return fmt.Errorf("put flags before the query: cli search %s \"%s\"", a, fs.Arg(0))
+	// A word like "-5" is a query word; only names of real flags are refused.
+	for i, a := range fs.Args()[1:] {
+		name, _, _ := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		if strings.HasPrefix(a, "-") && fs.Lookup(name) != nil {
+			return fmt.Errorf("put flags before the query: cli search %s \"%s\"",
+				strings.Join(fs.Args()[i+1:], " "), strings.Join(fs.Args()[:i+1], " "))
 		}
 	}
 	query := strings.Join(fs.Args(), " ")

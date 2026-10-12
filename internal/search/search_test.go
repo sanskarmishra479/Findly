@@ -435,3 +435,41 @@ func TestHindiWordsAreNotSplitIntoLetters(t *testing.T) {
 		t.Errorf("unexpected match: %v", names(rs))
 	}
 }
+
+// Review of the Medium fixes: an emoji's variation selector (U+FE0F) or keycap mark
+// (U+20E3) is not a word, and must not turn every keyword search into "no results".
+func TestEmojiMarksAreNotWords(t *testing.T) {
+	for in, want := range map[string]string{
+		"cat ❤️":   "cat",
+		"#️⃣ rent": "rent",
+		"1️⃣ rent": "1,rent",
+		"́ rent":   "rent", // a lone combining accent
+		"café":    "café",
+		"किराया":   "किराया", // किराया stays one word
+	} {
+		if got := strings.Join(Parse(in).Words, ","); got != want {
+			t.Errorf("Parse(%+q).Words = %+q, want %+q", in, got, want)
+		}
+	}
+	rs, err := standard(t).searcher(t, nil).Keyword(context.Background(), "dogs ❤️", store.Filter{}, false)
+	if err != nil || len(rs) != 1 {
+		t.Fatalf("emoji query: got %v %v", names(rs), err)
+	}
+}
+
+// Review of the Medium fixes: Chinese, Japanese and Thai have no spaces between words,
+// so a quoted phrase is matched as a substring there.
+func TestFusePhraseInSpacelessScripts(t *testing.T) {
+	mk := func(id int64, text string) Result {
+		return Result{File: store.File{ID: id, Name: "x.txt"}, text: text, Meaning: true}
+	}
+	for phrase, text := range map[string]string{
+		"東京":      "東京に行きます",         // 東京 in 東京に行きます
+		"ค่าเช่า": "จ่ายค่าเช่าแล้ว", // ค่าเช่า in a sentence
+	} {
+		out := Fuse(Parse(`"`+phrase+`"`), nil, []Result{mk(1, text)})
+		if len(out) != 1 || !out[0].Exact {
+			t.Errorf("%+q in %+q: got %+v", phrase, text, out)
+		}
+	}
+}

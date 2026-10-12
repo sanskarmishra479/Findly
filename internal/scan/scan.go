@@ -341,15 +341,21 @@ var credentialDirs = map[string]bool{
 	".password-store": true, ".terraform": true,
 }
 
-// SecretFolder reports whether path is, or is inside, a credentials folder: the checks
-// for children also apply to every part of a folder the user picks directly.
+// SecretFolder reports whether path is, or is inside, a credentials folder. The folder
+// itself gets the same name rules as a subfolder found while scanning ("KeePass",
+// "MyPasswords"); its parents get the narrower whole-word rules, so a parent like
+// "TestScanSkipsSecrets123" does not hide everything below it.
 func SecretFolder(path string) bool {
 	vol := filepath.VolumeName(path)
-	for _, part := range strings.Split(strings.TrimPrefix(filepath.Clean(path), vol), `\`) {
+	parts := strings.Split(strings.TrimPrefix(filepath.Clean(path), vol), `\`)
+	for i, part := range parts {
 		if part == "" {
 			continue
 		}
 		if credentialDirs[strings.ToLower(part)] || secretWords(part) {
+			return true
+		}
+		if i == len(parts)-1 && IsSecretName(part) {
 			return true
 		}
 	}

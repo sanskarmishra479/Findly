@@ -199,3 +199,12 @@ Three parallel review agents covered the whole phase; 8 High findings, all confi
 - **Timeout (#15):** per-request timeout 1 min + 1 min per input (was a fixed 5 min for 16 passages).
 - **Secret roots (#16):** `scan.Root` refuses a chosen folder that is, or is inside, a credentials folder (`.ssh`, `.aws`, …) or a folder named with the words password(s)/secret(s)/credential(s) (`ErrSecretRoot`). Whole words only for path parts (substring rules hit e.g. "TestScanSkipsSecrets123"); folders inside AppData remain allowed.
 - **Read-only type (#17):** `safefs.Open` returns `*safefs.File` (Read/ReadAt/Seek/Stat/Name/Close only), so code that writes to a user file does not compile.
+
+## Phase 1 review — Medium fixes, round 2 (2026-10-12)
+- **Emoji:** a combining mark only counts as part of a word after a letter or digit, and variation selectors never do. `"rent ❤️"` had become `"rent" AND "️"` and found nothing.
+- **Spaceless scripts:** quoted phrases in Chinese, Japanese, Thai, Lao, Khmer or Myanmar text are checked as substrings, because whole-word checks never match inside a sentence with no spaces.
+- **Model info:** `EnsureModel` writes `vector_dim`, `created_at` and `model_version` in one transaction (`model_version` last), so a crash can't leave an index that looks like it came from another model.
+- **Secret roots:** `index.Indexer.AddRoot` refuses credential folders *before* saving them (a saved one failed every run and blocked adding its parent). The chosen folder itself also gets the full subfolder name rules (`KeePass`, `MyPasswords`, `passwd`); its parent folders keep the narrower whole-word rules.
+- **Free slots:** `queueSkipped` subtracts this scan's new files from the free room first.
+- **CLI:** the flags-after-query hint keeps the whole query and the flag values; words like `-5` are search words unless they name a real flag.
+- Accepted: `SkippedFiles` picks the newest skipped files and ignores the Desktop/Documents preference (only affects which files fill a few freed slots).

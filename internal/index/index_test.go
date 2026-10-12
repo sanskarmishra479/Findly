@@ -549,3 +549,37 @@ func TestSkippedFilesNotRequeuedAtLimit(t *testing.T) {
 		t.Fatalf("after license: Indexed = %d, want 20", st.Indexed)
 	}
 }
+
+// Review of the Medium fixes: new files found in this scan take free slots before
+// files skipped earlier are queued again, so nothing is queued just to be skipped.
+func TestRequeueLeavesRoomForNewFiles(t *testing.T) {
+	e := newEnv(t)
+	for i := range FreeLimit + 20 {
+		e.write(fmt.Sprintf("f/%03d.txt", i), fmt.Sprintf("document %d words %d", i, i*3))
+	}
+	e.run()
+	for i := range 5 { // frees 5 slots
+		os.Remove(filepath.Join(e.dir, "f", fmt.Sprintf("%03d.txt", i)))
+	}
+	for i := range 3 {
+		e.write(fmt.Sprintf("new/%d.txt", i), fmt.Sprintf("new note %d", i))
+	}
+	if st := e.run(); st.Skipped != 0 || st.Indexed != 5 {
+		t.Fatalf("got Indexed %d, Skipped %d; want 5 indexed (3 new + 2 requeued), 0 skipped", st.Indexed, st.Skipped)
+	}
+}
+
+// Review of the Medium fixes: a credential folder is refused before it is saved, so
+// no stale root is left behind.
+func TestAddRootRefusesSecretFolder(t *testing.T) {
+	e := newEnv(t)
+	p := filepath.Join(e.dir, ".ssh")
+	os.MkdirAll(p, 0o755)
+	if _, err := e.ix.AddRoot(context.Background(), p); !errors.Is(err, scan.ErrSecretRoot) {
+		t.Fatalf("got %v, want ErrSecretRoot", err)
+	}
+	roots, _ := e.st.Roots(context.Background())
+	if len(roots) != 1 {
+		t.Fatalf("secret folder was saved: %+v", roots)
+	}
+}

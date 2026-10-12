@@ -60,11 +60,30 @@ func Parse(raw string) (q Query) {
 // words, which drops every FTS5 operator character. Marks must stay inside the word:
 // Devanagari vowel signs are marks, and splitting at them turned "किराया" (rent) into
 // single letters joined by AND, which matched almost any Hindi text. Kept whole and
-// quoted, FTS5 matches the word as a phrase of its own tokens, which is precise.
+// quoted, FTS5 matches the word as a phrase of its own tokens.
+//
+// A mark only counts when it follows a letter or digit. Emoji carry marks of their own
+// (the variation selector U+FE0F after "❤", the keycap U+20E3), and a word made of just
+// that mark matches nothing, so "rent ❤️" would find no file at all. Variation selectors
+// never belong to a word.
 func words(s string) []string {
-	return strings.FieldsFunc(s, func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsNumber(r) && !unicode.IsMark(r)
-	})
+	var out []string
+	start := -1 // byte offset where the current word began, or -1
+	for i, r := range s {
+		inWord := unicode.IsLetter(r) || unicode.IsNumber(r) ||
+			(start >= 0 && unicode.IsMark(r) && !unicode.Is(unicode.Variation_Selector, r))
+		switch {
+		case inWord && start < 0:
+			start = i
+		case !inWord && start >= 0:
+			out = append(out, s[start:i])
+			start = -1
+		}
+	}
+	if start >= 0 {
+		out = append(out, s[start:])
+	}
+	return out
 }
 
 // Match builds a safe FTS5 MATCH expression: every word is quoted, so user text can

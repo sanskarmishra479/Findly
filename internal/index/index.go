@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -85,6 +86,16 @@ type job struct {
 	file       scan.File
 	prio       int  // lower runs first
 	hadContent bool // already counted in the free-tier total
+}
+
+// AddRoot saves a folder the user chose. Credential folders are refused here, before
+// they are saved: a stored one would fail every later index run and block adding its
+// parent ("folders overlap").
+func (ix *Indexer) AddRoot(ctx context.Context, path string) (store.Root, error) {
+	if scan.SecretFolder(filepath.Clean(path)) {
+		return store.Root{}, fmt.Errorf("%w: %s", scan.ErrSecretRoot, path)
+	}
+	return ix.Store.AddRoot(ctx, path)
 }
 
 // IndexRoot scans root, removes files that disappeared, and indexes new or changed files.
@@ -502,6 +513,13 @@ func (ix *Indexer) queueSkipped(ctx context.Context, rootID int64, now time.Time
 			return err
 		}
 		room = FreeLimit - used
+		// Files this scan already queued that would use a slot (new, or not yet indexed
+		// with content) take room first.
+		for _, j := range *jobs {
+			if !j.hadContent {
+				room--
+			}
+		}
 	}
 	if room <= 0 {
 		return nil

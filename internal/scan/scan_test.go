@@ -320,3 +320,18 @@ func TestSecretRootRefused(t *testing.T) {
 		t.Errorf("a normal folder inside AppData refused: %v", err)
 	}
 }
+
+// Review of the Medium fixes: a chosen folder gets the same name rules as a subfolder.
+func TestSecretFolderUsesChildRulesForTheFolderItself(t *testing.T) {
+	for _, p := range []string{`D:\MyPasswords`, `D:\passwd`, `D:\KeePass`, `D:\Passwords2024`, `D:\Work\.ssh`} {
+		if !SecretFolder(p) {
+			t.Errorf("%s allowed", p)
+		}
+	}
+	// Parents only get the whole-word rules (test temp folders look like this).
+	for _, p := range []string{`C:\Temp\TestScanSkipsSecrets123\001`, `D:\Keys to success`, `D:\Secretary notes`, `D:\`} {
+		if SecretFolder(p) {
+			t.Errorf("%s refused", p)
+		}
+	}
+}

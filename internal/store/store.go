@@ -1044,16 +1044,25 @@ func (s *Store) EnsureModel(ctx context.Context, modelVersion string) error {
 		return err
 	}
 	if !ok {
-		for k, v := range map[string]string{
-			"model_version": modelVersion,
-			"vector_dim":    dim,
-			"created_at":    time.Now().UTC().Format(time.RFC3339),
+		// One transaction: a crash after writing only model_version would otherwise
+		// leave an index that looks like it came from another model.
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		for _, kv := range [][2]string{
+			{"vector_dim", dim},
+			{"created_at", time.Now().UTC().Format(time.RFC3339)},
+			{"model_version", modelVersion},
 		} {
-			if err := s.SetMeta(ctx, k, v); err != nil {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+				kv[0], kv[1]); err != nil {
 				return err
 			}
 		}
-		return nil
+		return tx.Commit()
 	}
 	haveDim, _, err := s.Meta(ctx, "vector_dim")
 	if err != nil {
