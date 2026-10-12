@@ -1043,7 +1043,20 @@ var ErrModelChanged = errors.New("store: the index was built with a different mo
 // returns ErrModelChanged if the index was built with different ones.
 func (s *Store) EnsureModel(ctx context.Context, modelVersion string) error {
 	dim := strconv.Itoa(VectorDim)
-	// One write transaction (the store opens them with BEGIN IMMEDIATE) for the read and
+	// Usual case, without a write lock: the model is already recorded.
+	if have, ok, err := s.Meta(ctx, "model_version"); err != nil {
+		return err
+	} else if ok {
+		haveDim, _, err := s.Meta(ctx, "vector_dim")
+		if err != nil {
+			return err
+		}
+		if have != modelVersion || haveDim != dim {
+			return fmt.Errorf("%w: index has %s (%s dims), this app uses %s (%s dims)", ErrModelChanged, have, haveDim, modelVersion, dim)
+		}
+		return nil
+	}
+	// First use. One write transaction (the store opens them with BEGIN IMMEDIATE) for the read and
 	// the first write: two apps starting together cannot both see "no model" and
 	// overwrite each other, and a crash cannot leave only some of the keys written.
 	tx, err := s.db.BeginTx(ctx, nil)

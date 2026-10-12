@@ -221,3 +221,12 @@ Three parallel review agents covered the whole phase; 8 High findings, all confi
 - **CLI:** `search -after/-before YYYY-MM-DD` (local days, plan 9.11). `spike -data` was renamed `-media`, because `-data` means the app data folder everywhere else. `compare` refuses vectors of different lengths (it used to panic).
 - **Cleanup:** chunk comments now say bytes, not characters, and `Max` is documented as a test bound. The unused `sidecar.ErrExited` is removed. `store.Count` checks `rows.Err()`. The `Indexer.store` method is renamed `save`, because it shadowed the package name.
 - **Accepted:** `staticcheck` doesn't support Go 1.27 yet, so `go vet` and `govulncheck` are used until a release does. The spike tool has no port-owner check (dev-only; the app path in `embed` has one).
+
+## Phase 1 review — Medium round 4 + Low part 2 (2026-10-12)
+- **Secret folders:** every part of a chosen path gets the full folder rules, so `MySecrets\Bank` is refused, just as a scan of the parent skips `MySecrets`. The parent exception existed only for Go test temp folders, so the tests were renamed ("Secret" became "Private") instead.
+- Accepted: parents such as `PasswordReset\src` or `Credentialing Committee\Minutes` are refused. This matches what a scan of their parent already skips; safety comes first.
+- **Secret names:** trailing dots and spaces are ignored (`key.pem.`, `id_rsa `).
+- **Phrases:** ー/ｰ (Common script, used only in kana words) and Korean (particles attach to words) count as spaceless.
+- **`EnsureModel`:** reads first without a lock and takes the write transaction only on first use.
+- **Cleanup:** removed the unused `VectorCache.Len`.
+- Accepted (scope): password managers with other names ("Vault", "Enpass") and non-English words ("Passwort", "Contraseñas") are not detected. `\?\C:\…` roots get a "not available" error instead of a clearer one.

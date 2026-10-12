@@ -83,15 +83,22 @@ var secretNames = map[string]bool{
 // files, and everything inside such folders, are skipped completely, even inside folders
 // the user chose.
 func IsSecretName(name string) bool {
-	n := strings.ToLower(name)
+	n := secretKey(name)
 	return secretExts[filepath.Ext(n)] || secretNameRules(n) || containsSecret(n)
 }
 
 // IsSecretFolderName is IsSecretName for folders: the extension rules are left out, since
 // a folder named "Website.asc" or "Bob.Key" is not a key file.
 func IsSecretFolderName(name string) bool {
-	n := strings.ToLower(name)
+	n := secretKey(name)
 	return credentialDirs[n] || secretWords(n) || secretNameRules(n) || containsSecret(n)
+}
+
+// secretKey lower-cases a name and drops trailing dots and spaces: Windows ignores them
+// in normal paths, but a file created with a long-path prefix can keep them, and "key.pem."
+// must still count as a .pem file.
+func secretKey(name string) string {
+	return strings.TrimRight(strings.ToLower(name), ". ")
 }
 
 // secretNameRules are the name rules shared by files and folders (n is lower case),
@@ -353,11 +360,10 @@ var credentialDirs = map[string]bool{
 	".password-store": true, ".terraform": true,
 }
 
-// SecretFolder reports whether path is, or is inside, a credentials folder. The folder
-// itself gets the same rules as a subfolder found while scanning ("KeePass",
-// "MySecrets"). Its parents get the same rules except the bare "secret" substring, which
-// only counts as a whole word there: a parent like "TestScanSkipsSecrets123" (a Go test
-// folder) must not hide everything below it.
+// SecretFolder reports whether path is, or is inside, a credentials folder: every part
+// gets the rules a subfolder gets while scanning ("KeePass", "MySecrets"), so choosing a
+// folder inside one is refused just as a scan of its parent would skip it. (Go puts the
+// test name in temp folder paths, so tests here avoid names like "TestSecret…".)
 func SecretFolder(path string) bool {
 	path = filepath.Clean(path)
 	vol := filepath.VolumeName(path)
@@ -366,19 +372,8 @@ func SecretFolder(path string) bool {
 	if strings.HasPrefix(vol, `\\`) {
 		parts = append([]string{vol[strings.LastIndex(vol, `\`)+1:]}, parts...)
 	}
-	last := len(parts) - 1
-	for last > 0 && parts[last] == "" { // "\\srv\Passwords\" has an empty last part
-		last--
-	}
-	for i, part := range parts {
-		if part == "" {
-			continue
-		}
-		n := strings.ToLower(part)
-		if credentialDirs[n] || secretWords(n) || secretNameRules(n) {
-			return true
-		}
-		if i == last && containsSecret(n) {
+	for _, part := range parts {
+		if part != "" && IsSecretFolderName(part) {
 			return true
 		}
 	}
@@ -386,8 +381,8 @@ func SecretFolder(path string) bool {
 }
 
 // secretWords matches folder names made of words like "passwords", "secrets",
-// "credentials" ("My Passwords", "old_credentials"). Whole words only: substring rules on
-// every part of a path matched unrelated folders such as "TestScanSkipsSecrets123".
+// "credentials" ("My Passwords", "old_credentials"). Whole words, which also catch
+// "Passwords" written as part of a longer phrase.
 func secretWords(name string) bool {
 	for _, w := range strings.FieldsFunc(strings.ToLower(name), func(r rune) bool {
 		return r == ' ' || r == '_' || r == '-' || r == '.'

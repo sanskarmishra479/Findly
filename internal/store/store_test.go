@@ -794,3 +794,28 @@ func TestEnsureModelFirstWriterWins(t *testing.T) {
 		t.Fatalf("model_version = %q", v)
 	}
 }
+
+// Round 3 review: an index that already records the model is checked without taking the
+// write lock, so startup does not wait for another writer.
+func TestEnsureModelNoWriteLockWhenRecorded(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+	if err := s.EnsureModel(ctx, "model-a"); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil) // holds the write lock (BEGIN IMMEDIATE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	done := make(chan error, 1)
+	go func() { done <- s.EnsureModel(ctx, "model-a") }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("EnsureModel waited for the write lock")
+	}
+}

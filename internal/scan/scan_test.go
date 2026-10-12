@@ -87,7 +87,7 @@ func TestScanFindsNormalFilesAndSkipsJunk(t *testing.T) {
 }
 
 // P-6: secret-looking files and credential folders are never indexed, not even by name.
-func TestScanSkipsSecrets(t *testing.T) {
+func TestScanSkipsPrivate(t *testing.T) {
 	root := tree(t,
 		"ok.txt",
 		"server.pem", "private.key", "cert.pfx", "cert.p12", "vault.kdbx", "work.ovpn",
@@ -196,7 +196,7 @@ func TestScanBadRootIsError(t *testing.T) {
 }
 
 // Review findings 2+3: secret-named folders are skipped; look-alike names are not.
-func TestScanSecretFoldersAndLookalikes(t *testing.T) {
+func TestScanPrivateFoldersAndLookalikes(t *testing.T) {
 	root := tree(t,
 		"Passwords/bank-logins.txt", "Secrets/keys.txt", "credentials/aws.txt",
 		"credentials.json", "service-credential.json", "accessKeys.csv", ".netrc", "putty.ppk", "release.jks",
@@ -206,7 +206,7 @@ func TestScanSecretFoldersAndLookalikes(t *testing.T) {
 	equal(t, got, ".envelope.txt", "Secretary meeting.docx", "secretariat.txt", "envoy.txt")
 }
 
-func TestIsSecretName(t *testing.T) {
+func TestIsPrivateName(t *testing.T) {
 	yes := []string{"top_secret.txt", "secretary_secrets.txt", "my.passwd", "x.GPG", ".env", ".env.production"}
 	no := []string{"secretary.docx", "Secretariat notes.pdf", ".envrc.txt", "environment.md"}
 	for _, n := range yes {
@@ -306,7 +306,7 @@ func TestCodesAndSeedNames(t *testing.T) {
 }
 
 // Medium #16: a credentials folder chosen directly (or a folder inside one) is refused.
-func TestSecretRootRefused(t *testing.T) {
+func TestPrivateRootRefused(t *testing.T) {
 	base := t.TempDir()
 	for _, rel := range []string{".aws", `.ssh\keys`, "My Passwords", `Work\credentials\old`} {
 		p := filepath.Join(base, rel)
@@ -324,14 +324,14 @@ func TestSecretRootRefused(t *testing.T) {
 }
 
 // Review of the Medium fixes: a chosen folder gets the same name rules as a subfolder.
-func TestSecretFolderUsesChildRulesForTheFolderItself(t *testing.T) {
+func TestPrivateFolderUsesChildRulesForTheFolderItself(t *testing.T) {
 	for _, p := range []string{`D:\MyPasswords`, `D:\passwd`, `D:\KeePass`, `D:\Passwords2024`, `D:\Work\.ssh`} {
 		if !SecretFolder(p) {
 			t.Errorf("%s allowed", p)
 		}
 	}
-	// Parents only get the whole-word rules (test temp folders look like this).
-	for _, p := range []string{`C:\Temp\TestScanSkipsSecrets123\001`, `D:\Keys to success`, `D:\Secretary notes`, `D:\`} {
+	// Lookalikes stay allowed, as folders and as parents.
+	for _, p := range []string{`C:\Users\Secretary\Docs`, `D:\Keys to success`, `D:\Secretary notes`, `D:\`} {
 		if SecretFolder(p) {
 			t.Errorf("%s refused", p)
 		}
@@ -339,7 +339,7 @@ func TestSecretFolderUsesChildRulesForTheFolderItself(t *testing.T) {
 }
 
 // Review round 2: parents of the chosen folder, share names and folder "extensions".
-func TestSecretFolderParentsSharesAndExtensions(t *testing.T) {
+func TestPrivateFolderParentsSharesAndExtensions(t *testing.T) {
 	for _, p := range []string{`D:\KeePass\exports`, `D:\MyPasswords\docs`, `D:\Bitwarden\exports`,
 		`\server\Passwords`, `\server\Passwords\`, `\?\UNC\srv\KeePass`, `\srv\share\.aws\x`} {
 		if !SecretFolder(p) {
@@ -354,5 +354,20 @@ func TestSecretFolderParentsSharesAndExtensions(t *testing.T) {
 	}
 	if IsSecretFolderName("Website.asc") || !IsSecretName("website.asc") {
 		t.Error("extension rule must apply to files only")
+	}
+}
+
+// Round 3 review: folders inside a "MySecrets"-style folder, and names with trailing
+// dots or spaces.
+func TestPrivateFolderInsideAndTrailingDots(t *testing.T) {
+	for _, p := range []string{`C:\Users\bob\MySecrets\Bank`, `\srv\MySecrets\x`, `D:\KeePass. \x`} {
+		if !SecretFolder(p) {
+			t.Errorf("%s allowed", p)
+		}
+	}
+	for _, n := range []string{"key.pem.", "id_rsa ", "wallet.dat. ", ".env."} {
+		if !IsSecretName(n) {
+			t.Errorf("%q not treated as secret", n)
+		}
 	}
 }

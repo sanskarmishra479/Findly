@@ -493,3 +493,16 @@ func TestFusePhraseMixedScripts(t *testing.T) {
 		t.Errorf("Latin word between Han letters not found: %+v", out)
 	}
 }
+
+// Round 3 review: the long-vowel mark ー is "Common" script, and Korean particles attach
+// to words.
+func TestFusePhraseLongVowelAndKorean(t *testing.T) {
+	mk := func(text string) []Result {
+		return []Result{{File: store.File{ID: 1, Name: "x.txt"}, text: text, Meaning: true}}
+	}
+	for phrase, text := range map[string]string{"コーヒー": "コーヒーshop", "ｺｰﾋｰ": "ｺｰﾋｰshop", "서울": "서울에서 만나요"} {
+		if out := Fuse(Parse(`"`+phrase+`"`), nil, mk(text)); len(out) != 1 || !out[0].Exact {
+			t.Errorf("%q in %q: got %+v", phrase, text, out)
+		}
+	}
+}

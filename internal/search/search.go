@@ -277,9 +277,12 @@ func edgeOK(out, in rune) bool {
 }
 
 // spaceless reports whether r belongs to a script written without spaces between words.
+// The Japanese long-vowel marks ー and ｰ are "Common" script but only appear in kana
+// words ("コーヒー"). Korean uses spaces, but particles attach to words ("서울에서" is
+// "in Seoul"), so a Korean word can also sit inside a longer run of letters.
 func spaceless(r rune) bool {
-	return unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana, unicode.Thai,
-		unicode.Lao, unicode.Khmer, unicode.Myanmar)
+	return r == 'ー' || r == 'ｰ' || unicode.In(r, unicode.Han, unicode.Hiragana, unicode.Katakana,
+		unicode.Thai, unicode.Lao, unicode.Khmer, unicode.Myanmar, unicode.Hangul)
 }
 
 // normalize collapses punctuation to spaces so "INV-2024-001" matches "inv 2024 001".
@@ -377,13 +380,6 @@ func (c *VectorCache) Load(ctx context.Context, st *store.Store) error {
 	c.items, c.files, c.bins, c.q, c.metas, c.fileIdx = items, files, bins, qs, metas, fileIdx
 	c.mu.Unlock()
 	return nil
-}
-
-// Len returns the number of cached vectors.
-func (c *VectorCache) Len() int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return len(c.items)
 }
 
 // Scored is a candidate item with its int8 similarity.

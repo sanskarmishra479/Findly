@@ -571,7 +571,7 @@ func TestRequeueLeavesRoomForNewFiles(t *testing.T) {
 
 // Review of the Medium fixes: a credential folder is refused before it is saved, so
 // no stale root is left behind.
-func TestAddRootRefusesSecretFolder(t *testing.T) {
+func TestAddRootRefusesPrivateFolder(t *testing.T) {
 	e := newEnv(t)
 	p := filepath.Join(e.dir, ".ssh")
 	os.MkdirAll(p, 0o755)
