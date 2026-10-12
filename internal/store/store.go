@@ -759,16 +759,23 @@ type KeywordHit struct {
 // rows are joined to items/files: joining every match before ranking took ~270 ms for a
 // common word in 50k passages. The candidate limit is larger with filters, because many
 // candidates may be filtered out.
-func (s *Store) KeywordSearch(ctx context.Context, match string, fl Filter, maxFiles int) ([]KeywordHit, error) {
+func (s *Store) KeywordSearch(ctx context.Context, match string, fl Filter, maxFiles int, ranked bool) ([]KeywordHit, error) {
 	where, args := fl.sql()
 	candidates := 500
 	if where != "1" {
 		candidates = 5000
 	}
+	// Ranking scores every match (67 ms for a word in 25k of 50k passages). While the user
+	// is still typing, the first matches are good enough and arrive in about a millisecond;
+	// the ranked search runs once typing pauses.
+	inner := `SELECT rowid AS id, bm25(items_fts, 2.0, 1.0) AS r
+		      FROM items_fts WHERE items_fts MATCH ? ORDER BY r LIMIT ?`
+	if !ranked {
+		inner = `SELECT rowid AS id, 0.0 AS r FROM items_fts WHERE items_fts MATCH ? LIMIT ?`
+	}
 	q := `
 		SELECT i.id, i.file_id, i.kind, coalesce(i.locator, ''), coalesce(i.text, ''), k.r
-		FROM (SELECT rowid AS id, bm25(items_fts, 2.0, 1.0) AS r
-		      FROM items_fts WHERE items_fts MATCH ? ORDER BY r LIMIT ?) k
+		FROM (` + inner + `) k
 		JOIN items i ON i.id = k.id
 		JOIN files f ON f.id = i.file_id
 		WHERE ` + where + `

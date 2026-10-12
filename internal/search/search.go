@@ -79,7 +79,8 @@ func (s *Searcher) Keyword(ctx context.Context, raw string, fl store.Filter, typ
 	if q.Empty() {
 		return nil, nil
 	}
-	hits, err := s.Store.KeywordSearch(ctx, q.Match(typing), fl, KeywordLimit)
+	// While typing: unranked first matches (fast); otherwise ranked by bm25.
+	hits, err := s.Store.KeywordSearch(ctx, q.Match(typing), fl, KeywordLimit, !typing)
 	if err != nil {
 		return nil, err
 	}

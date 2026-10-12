@@ -30,7 +30,7 @@ func runEval(args []string) error {
 	queries := fs.String("queries", filepath.Join("evals", "queries.jsonl"), "queries file")
 	resultsDir := fs.String("results", filepath.Join("evals", "results"), "where to save the results JSON")
 	cutoffs := fs.String("cutoffs", "0.55,0.60,0.65", "absolute semantic cutoffs to compare")
-	gaps := fs.String("gaps", "0,0.06,0.08,0.10", "relative cutoffs to compare (drop hits this far below the best; 0 = off)")
+	gaps := fs.String("gaps", "0,0.08", "relative cutoffs to compare (drop hits this far below the best; 0 = off)")
 	verbose := fs.Bool("v", false, "show every query's top results")
 	fs.Parse(args)
 
@@ -69,7 +69,7 @@ func runEval(args []string) error {
 	}
 	defer en.close()
 	ctx := context.Background()
-	if err := en.startEmbedder(ef, false); err != nil {
+	if err := en.startEmbedder(ctx, ef, false); err != nil {
 		return err
 	}
 
@@ -180,11 +180,11 @@ func runEval(args []string) error {
 		q := float64(len(cases))
 		lr.Recall5, lr.MRR10, lr.Returned, lr.Noise = lr.Recall5/q, lr.MRR10/q, lr.Returned/q, lr.Noise/q
 		report = append(report, lr)
-		fmt.Printf("%-8.2f %-10.3f %-8.3f %-12.1f %.1f\n", lv, lr.Recall5, lr.MRR10, lr.Returned, lr.Noise)
+		fmt.Printf("%-8.2f %-6.2f %-10.3f %-8.3f %-12.1f %.1f\n", lv, gap, lr.Recall5, lr.MRR10, lr.Returned, lr.Noise)
 	}
 	for _, lr := range report {
 		if len(lr.Misses) > 0 {
-			fmt.Printf("\nmisses at cutoff %.2f: %s\n", lr.Cutoff, strings.Join(lr.Misses, " | "))
+			fmt.Printf("\nmisses at cutoff %.2f gap %.2f: %s\n", lr.Cutoff, lr.Gap, strings.Join(lr.Misses, " | "))
 		}
 	}
 	fmt.Printf("\naverage search time (keyword + query embedding + semantic): %v\n",

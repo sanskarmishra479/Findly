@@ -11,6 +11,7 @@ import (
 	"github.com/sanskarmishra479/findly/internal/appfs"
 	"github.com/sanskarmishra479/findly/internal/embed"
 	"github.com/sanskarmishra479/findly/internal/extract"
+	"github.com/sanskarmishra479/findly/internal/safefs"
 	"github.com/sanskarmishra479/findly/internal/store"
 )
 
@@ -58,7 +59,7 @@ func openEngine(e engineFlags) (*engine, error) {
 }
 
 // startEmbedder launches llama-server with the text model.
-func (en *engine) startEmbedder(e engineFlags, lowPriority bool) error {
+func (en *engine) startEmbedder(ctx context.Context, e engineFlags, lowPriority bool) error {
 	if e.backend != "cpu" && e.backend != "vulkan" {
 		return fmt.Errorf("unknown backend %q", e.backend)
 	}
@@ -77,7 +78,7 @@ func (en *engine) startEmbedder(e engineFlags, lowPriority bool) error {
 		}
 	}
 	fmt.Fprintln(os.Stderr, "starting the embedding model…")
-	srv, err := embed.Start(context.Background(), cfg)
+	srv, err := embed.Start(ctx, cfg) // ctx: Ctrl+C also stops a slow model start
 	if err != nil {
 		return err
 	}
@@ -97,8 +98,32 @@ func (en *engine) close() {
 // removeThumbs deletes thumbnail files of removed index entries (P-5).
 func (en *engine) removeThumbs(paths []string) {
 	for _, p := range paths {
-		if err := en.fs.Remove(filepath.Join(appfs.DirThumbs, filepath.FromSlash(p))); err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Paths come from the database. A corrupt value like "..\license\x" must not
+		// delete anything outside the thumbnails folder (appfs alone only keeps it inside
+		// the app folder).
+		rel := filepath.FromSlash(p)
+		if !filepath.IsLocal(rel) {
+			fmt.Fprintln(os.Stderr, "warning: ignoring bad thumbnail path:", p)
+			continue
+		}
+		if err := en.fs.Remove(filepath.Join(appfs.DirThumbs, rel)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintln(os.Stderr, "warning: could not remove thumbnail:", err)
 		}
 	}
+}
+
+// absFolder turns a user-typed folder into the absolute, real form stored in the index,
+// so "docs", "C:" or a path with a trailing backslash still match.
+func absFolder(p string) (string, error) {
+	if len(p) == 2 && p[1] == ':' {
+		p += `\` // "C:" means the drive root, not the current folder on C:
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	if real, err := safefs.Canonical(abs); err == nil {
+		return real, nil
+	}
+	return abs, nil // a folder that no longer exists (e.g. for remove)
 }

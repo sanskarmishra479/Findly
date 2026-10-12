@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -42,11 +43,12 @@ func runIndex(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	root, err := en.store.AddRoot(ctx, folder)
-	if err != nil {
+	// Start the model first: if its files are missing, no empty folder entry is left behind.
+	if err := en.startEmbedder(ctx, ef, true); err != nil {
 		return err
 	}
-	if err := en.startEmbedder(ef, true); err != nil {
+	root, err := en.store.AddRoot(ctx, folder)
+	if err != nil {
 		return err
 	}
 
@@ -102,7 +104,7 @@ func runSearch(args []string) error {
 
 	s := &search.Searcher{Store: en.store}
 	if !*keywordOnly {
-		if err := en.startEmbedder(ef, false); err != nil {
+		if err := en.startEmbedder(ctx, ef, false); err != nil {
 			return err
 		}
 		s.Embedder = en.emb
@@ -111,9 +113,16 @@ func runSearch(args []string) error {
 			return err
 		}
 	}
-	fl := store.Filter{Folder: *folder}
-	if *kinds != "" {
-		fl.Kinds = strings.Split(*kinds, ",")
+	var fl store.Filter
+	if *folder != "" {
+		if fl.Folder, err = absFolder(*folder); err != nil {
+			return err
+		}
+	}
+	for _, k := range strings.Split(*kinds, ",") {
+		if k = strings.ToLower(strings.TrimSpace(k)); k != "" {
+			fl.Kinds = append(fl.Kinds, k)
+		}
 	}
 
 	start := time.Now()
@@ -208,12 +217,13 @@ func runRemove(args []string) error {
 	if err != nil {
 		return err
 	}
-	want := strings.ToUpper(strings.TrimRight(fs.Arg(0), `\`))
-	if c, err := safefs.Canonical(fs.Arg(0)); err == nil {
-		want = strings.ToUpper(c)
+	abs, err := absFolder(fs.Arg(0))
+	if err != nil {
+		return err
 	}
+	want := strings.ToUpper(filepath.Clean(abs))
 	for _, r := range roots {
-		if strings.ToUpper(r.Path) == want {
+		if strings.ToUpper(filepath.Clean(r.Path)) == want {
 			thumbs, err := en.store.RemoveRoot(ctx, r.ID)
 			if err != nil {
 				return err
