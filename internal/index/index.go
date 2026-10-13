@@ -80,11 +80,10 @@ type Stats struct {
 // Timing splits a run's time by stage. Extract is summed over the parallel workers, so
 // it can exceed Total.
 type Timing struct {
-	Extract  time.Duration // reading files and pulling out text
-	Embed    time.Duration // waiting for the embedding model
-	Passages int           // passages sent to the embedding model
-	Save     time.Duration // embedding stage minus Embed: chunking and database writes
-	Total    time.Duration // the whole embed-and-store stage, from first job to last
+	Extract time.Duration // reading files and pulling out text
+
+	Save  time.Duration // chunking and database writes
+	Total time.Duration // the whole store stage, from first job to last
 }
 
 // ErrEmbedder means the embedding server is not working; the run stops instead of
@@ -331,21 +330,18 @@ func (ix *Indexer) run(ctx context.Context, rootPath string, jobs []job, st *Sta
 	}()
 	go func() { wg.Wait(); close(results) }()
 
-	// Stage 2: embed and store, one file at a time.
+	// Stage 2: store, one file at a time. Passages are keyword-searchable at once; their
+	// vectors are added afterwards by EmbedPending.
 	stage2 := time.Now()
-	defer func() {
-		st.Timing.Total = time.Since(stage2)
-		st.Timing.Save -= st.Timing.Embed
-	}()
+	defer func() { st.Timing.Total = time.Since(stage2) }()
 	var runErr error
-	crashes := 0 // consecutive files that crashed the embedding server
 	for r := range results {
 		if runErr != nil {
 			continue // draining after a fatal error so the workers can exit
 		}
 		st.Timing.Extract += r.took
 		start := time.Now()
-		status, err := ix.save(ctx, r, tier, &crashes, &st.Timing)
+		status, err := ix.save(ctx, r, tier)
 		st.Timing.Save += time.Since(start)
 		if err != nil {
 			runErr = err
@@ -362,13 +358,10 @@ func (ix *Indexer) run(ctx context.Context, rootPath string, jobs []job, st *Sta
 
 var errOverLimit = errors.New("free version limit reached")
 
-// maxCrashFiles: if this many files in a row crash the embedding server, the server
-// itself is broken (not the files), so the run stops instead of failing every file.
-const maxCrashFiles = 3
-
-// save embeds and stores one extracted file and returns the status it recorded. (Not
+// save stores one extracted file and returns the status it recorded. Its passages are
+// keyword-searchable as soon as this returns; vectors come later (EmbedPending). (Not
 // named "store": that is the package it writes to.)
-func (ix *Indexer) save(ctx context.Context, r extracted, tier *freeTier, crashes *int, tm *Timing) (string, error) {
+func (ix *Indexer) save(ctx context.Context, r extracted, tier *freeTier) (string, error) {
 	id := r.job.id
 	set := func(status, hash, msg string) (string, error) {
 		return status, ix.Store.SetFileResult(ctx, id, status, "", hash, msg)
@@ -391,9 +384,10 @@ func (ix *Indexer) save(ctx context.Context, r extracted, tier *freeTier, crashe
 		status = store.StatusPartial // remaining pages: deferred job (Phase 4)
 	}
 
-	// Identical content already indexed: copy instead of embedding again.
+	// Identical content already indexed: copy it (with its vectors, or still waiting for
+	// them) instead of embedding it again.
 	if r.hash != "" {
-		copied, err := ix.Store.CopyDuplicate(ctx, r.hash, status, id)
+		copied, err := ix.Store.CopyDuplicate(ctx, r.hash, status, id, false)
 		if err != nil {
 			return "", err
 		}
@@ -403,25 +397,7 @@ func (ix *Indexer) save(ctx context.Context, r extracted, tier *freeTier, crashe
 		}
 	}
 
-	items, err := ix.items(ctx, r, tm)
-	if errors.Is(err, embed.ErrCrashed) {
-		// Plan section 5: the server restarts automatically; try this file once more. If it
-		// crashes again, this file is the likely cause: mark it failed and continue.
-		items, err = ix.items(ctx, r, tm)
-		if errors.Is(err, embed.ErrCrashed) {
-			if *crashes++; *crashes >= maxCrashFiles {
-				return "", err
-			}
-			return set(store.StatusFailed, "", "the embedding model crashed on this file twice")
-		}
-	}
-	if err != nil {
-		if errors.Is(err, ErrEmbedder) || ctx.Err() != nil {
-			return "", err
-		}
-		return set(store.StatusFailed, "", err.Error())
-	}
-	*crashes = 0
+	items := passages(r.doc)
 	if err := ix.Store.ReplaceContent(ctx, id, items); err != nil {
 		return "", err
 	}
@@ -439,54 +415,22 @@ func (ix *Indexer) account(tier *freeTier, j job, hasContent bool) {
 	}
 }
 
-// items chunks the document and embeds the passages. Mostly-numeric text (data
-// exports) is stored for keyword search only (plan 9.3).
-func (ix *Indexer) items(ctx context.Context, r extracted, tm *Timing) ([]store.Item, error) {
-	sections := make([]chunk.Section, len(r.doc.Sections))
-	for i, s := range r.doc.Sections {
+// passages chunks the document into passages that wait for their vectors.
+// Mostly-numeric text (data exports) is stored for keyword search only (plan 9.3).
+func passages(d extract.Doc) []store.Item {
+	sections := make([]chunk.Section, len(d.Sections))
+	for i, s := range d.Sections {
 		sections[i] = chunk.Section{Page: s.Page, Text: s.Text}
 	}
 	chunks := chunk.Split(sections)
-	if len(chunks) == 0 {
-		return nil, nil
-	}
 	items := make([]store.Item, len(chunks))
-	var toEmbed []string
-	var embedIdx []int
 	for i, c := range chunks {
-		items[i] = store.Item{Kind: store.ItemPassage, Locator: locator(c), Text: c.Text}
-		if !extract.MostlyNumeric(c.Text) {
-			toEmbed = append(toEmbed, c.Text)
-			embedIdx = append(embedIdx, i)
+		items[i] = store.Item{
+			Kind: store.ItemPassage, Locator: locator(c), Text: c.Text,
+			Pending: !extract.MostlyNumeric(c.Text),
 		}
 	}
-	if len(toEmbed) > 0 {
-		start := time.Now()
-		vecs, err := ix.Embedder.EmbedPassages(ctx, r.job.file.Name, toEmbed)
-		tm.Embed += time.Since(start)
-		tm.Passages += len(toEmbed)
-		if err != nil {
-			switch {
-			case ctx.Err() != nil:
-				// Paused or quitting: report it as such, not as a broken server (which
-				// could make the app switch backends).
-				return nil, ctx.Err()
-			case errors.Is(err, embed.ErrInput):
-				return nil, err // about this input only: the file fails, the run goes on
-			}
-			// Anything else (server down, crashed, broken output, timeout) stops the run so
-			// files are not wrongly marked failed. %w twice keeps ErrCrashed visible.
-			return nil, fmt.Errorf("%w: %w", ErrEmbedder, err)
-		}
-		if len(vecs) != len(toEmbed) {
-			return nil, fmt.Errorf("%w: got %d vectors for %d passages", ErrEmbedder, len(vecs), len(toEmbed))
-		}
-		for k, i := range embedIdx {
-			v := vecs[k]
-			items[i].Vector = &store.Vector{Bin: v.Bin, I8: v.Q.I8, Scale: v.Q.Scale}
-		}
-	}
-	return items, nil
+	return items
 }
 
 func locator(c chunk.Chunk) string {

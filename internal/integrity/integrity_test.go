@@ -242,6 +242,9 @@ func TestFileIntegrity(t *testing.T) {
 		if stats.Indexed == 0 || stats.Failed != 0 {
 			t.Fatalf("index stats: %+v", stats)
 		}
+		if est, err := ix.EmbedPending(ctx, nil); err != nil || est.Failed != 0 || est.Files == 0 {
+			t.Fatalf("embedding pass: %+v %v", est, err)
+		}
 		// P-6 and I-4: the secret file and the cloud-only file must not be in the index at all.
 		for _, rel := range []string{filepath.Join("secrets", "api.key"), "cloud-only.txt", "hidden-note.txt"} {
 			if _, ok, _ := st.FileByPath(ctx, filepath.Join(real, rel)); ok {

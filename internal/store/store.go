@@ -522,8 +522,18 @@ type Item struct {
 	Kind    string
 	Locator string  // JSON such as {"page":3} or {"t":125.0}; empty if none
 	Text    string  // passage or OCR text; empty if none
-	Vector  *Vector // nil if this item has no embedding (keyword-only)
+	Vector  *Vector // nil if this item has no embedding (yet)
+	// Pending marks an item without Vector that the embedding pass must still embed (as
+	// opposed to keyword-only text such as mostly-numeric data).
+	Pending bool
 }
+
+// Embedding states of an item (column items.embed).
+const (
+	embedNone    = 0 // has a vector, or keyword-only by design
+	embedPending = 1 // waiting for the embedding pass
+	embedFailed  = 2 // the embedding model failed on it; not retried
+)
 
 // ReplaceContent replaces all content items of a file (keeping its file-name row) in one
 // transaction, so search never sees a half-updated file.
@@ -544,7 +554,7 @@ func (s *Store) ReplaceContent(ctx context.Context, fileID int64, items []Item) 
 		return err
 	}
 
-	insItem, err := tx.PrepareContext(ctx, `INSERT INTO items(file_id, kind, locator, text) VALUES(?, ?, NULLIF(?, ''), NULLIF(?, ''))`)
+	insItem, err := tx.PrepareContext(ctx, `INSERT INTO items(file_id, kind, locator, text, embed) VALUES(?, ?, NULLIF(?, ''), NULLIF(?, ''), ?)`)
 	if err != nil {
 		return err
 	}
@@ -561,7 +571,11 @@ func (s *Store) ReplaceContent(ctx context.Context, fileID int64, items []Item) 
 	defer insVec.Close()
 
 	for _, it := range items {
-		res, err := insItem.ExecContext(ctx, fileID, it.Kind, it.Locator, it.Text)
+		state := embedNone
+		if it.Pending && it.Vector == nil {
+			state = embedPending
+		}
+		res, err := insItem.ExecContext(ctx, fileID, it.Kind, it.Locator, it.Text, state)
 		if err != nil {
 			return err
 		}
@@ -624,7 +638,11 @@ func (s *Store) HasContent(ctx context.Context, fileID int64) (bool, error) {
 // vectors and keyword rows to file `to`, all in one transaction, so the source cannot
 // disappear halfway. Identical files are embedded only once (plan 9.10). copied is false
 // if there is no usable source.
-func (s *Store) CopyDuplicate(ctx context.Context, hash, status string, to int64) (copied bool, err error) {
+//
+// Items still waiting for their vector are copied as waiting. With finishedOnly, only a
+// source whose passages all have their vectors counts (used by the embedding pass, so a
+// copy never takes over a twin's waiting or failed state instead of its vectors).
+func (s *Store) CopyDuplicate(ctx context.Context, hash, status string, to int64, finishedOnly bool) (copied bool, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -636,7 +654,8 @@ func (s *Store) CopyDuplicate(ctx context.Context, hash, status string, to int64
 		SELECT f.id FROM files f
 		WHERE f.content_hash = ? AND f.status = ? AND f.id <> ?
 		  AND EXISTS(SELECT 1 FROM items i WHERE i.file_id = f.id AND i.kind <> ?)
-		LIMIT 1`, hash, status, to, ItemName).Scan(&from)
+		  AND (? = 0 OR NOT EXISTS(SELECT 1 FROM items p WHERE p.file_id = f.id AND p.embed <> ?))
+		LIMIT 1`, hash, status, to, ItemName, finishedOnly, embedNone).Scan(&from)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -648,7 +667,7 @@ func (s *Store) CopyDuplicate(ctx context.Context, hash, status string, to int64
 		return false, err
 	}
 	rows, err := tx.QueryContext(ctx, `
-		SELECT i.kind, i.locator, i.text, v.bin, v.i8, v.scale
+		SELECT i.kind, i.locator, i.text, i.embed, v.bin, v.i8, v.scale
 		FROM items i LEFT JOIN vectors v ON v.item_id = i.id
 		WHERE i.file_id = ? AND i.kind <> ? ORDER BY i.id`, from, ItemName)
 	if err != nil {
@@ -657,13 +676,14 @@ func (s *Store) CopyDuplicate(ctx context.Context, hash, status string, to int64
 	type src struct {
 		kind          string
 		locator, text sql.NullString
+		embed         int
 		bin, i8       []byte
 		scale         sql.NullFloat64
 	}
 	var items []src
 	for rows.Next() {
 		var it src
-		if err := rows.Scan(&it.kind, &it.locator, &it.text, &it.bin, &it.i8, &it.scale); err != nil {
+		if err := rows.Scan(&it.kind, &it.locator, &it.text, &it.embed, &it.bin, &it.i8, &it.scale); err != nil {
 			rows.Close()
 			return false, err
 		}
@@ -674,8 +694,8 @@ func (s *Store) CopyDuplicate(ctx context.Context, hash, status string, to int64
 		return false, err
 	}
 	for _, it := range items {
-		res, err := tx.ExecContext(ctx, `INSERT INTO items(file_id, kind, locator, text) VALUES(?, ?, ?, ?)`,
-			to, it.kind, it.locator, it.text)
+		res, err := tx.ExecContext(ctx, `INSERT INTO items(file_id, kind, locator, text, embed) VALUES(?, ?, ?, ?, ?)`,
+			to, it.kind, it.locator, it.text, it.embed)
 		if err != nil {
 			return false, err
 		}

@@ -561,10 +561,10 @@ func TestDedupeCopyContent(t *testing.T) {
 	})
 	s.SetFileResult(ctx, orig, StatusDone, "", "hash1", "")
 
-	if copied, _ := s.CopyDuplicate(ctx, "hash1", StatusDone, orig); copied {
+	if copied, _ := s.CopyDuplicate(ctx, "hash1", StatusDone, orig, false); copied {
 		t.Fatal("copied from itself")
 	}
-	if copied, err := s.CopyDuplicate(ctx, "hash1", StatusDone, dup); err != nil || !copied {
+	if copied, err := s.CopyDuplicate(ctx, "hash1", StatusDone, dup, false); err != nil || !copied {
 		t.Fatalf("CopyDuplicate = %v %v", copied, err)
 	}
 	if n := count(t, s, `SELECT count(*) FROM items WHERE file_id = ? AND kind <> ?`, dup, ItemName); n != 2 {
@@ -581,7 +581,7 @@ func TestDedupeCopyContent(t *testing.T) {
 	if n := matches(t, s, "quarterly"); n != 1 {
 		t.Errorf("after delete: %d, want 1", n)
 	}
-	if copied, _ := s.CopyDuplicate(ctx, "unknown", StatusDone, dup); copied {
+	if copied, _ := s.CopyDuplicate(ctx, "unknown", StatusDone, dup, false); copied {
 		t.Error("unknown hash copied")
 	}
 }
@@ -831,10 +831,10 @@ func TestDedupePartialFiles(t *testing.T) {
 	s.ReplaceContent(ctx, orig, []Item{{Kind: ItemPassage, Locator: `{"page":1}`, Text: "page one", Vector: vec(1)}})
 	s.SetFileResult(ctx, orig, StatusPartial, "", "hashP", "")
 
-	if copied, _ := s.CopyDuplicate(ctx, "hashP", StatusDone, dup); copied {
+	if copied, _ := s.CopyDuplicate(ctx, "hashP", StatusDone, dup, false); copied {
 		t.Fatal("a fully read file was given a partial file's content")
 	}
-	if copied, err := s.CopyDuplicate(ctx, "hashP", StatusPartial, dup); err != nil || !copied {
+	if copied, err := s.CopyDuplicate(ctx, "hashP", StatusPartial, dup, false); err != nil || !copied {
 		t.Fatalf("partial duplicate not copied: %v %v", copied, err)
 	}
 }

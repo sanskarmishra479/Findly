@@ -86,6 +86,13 @@ func runEval(args []string) error {
 	if st.Failed > 0 {
 		return fmt.Errorf("%d testbed files failed to index", st.Failed)
 	}
+	est, err := ix.EmbedPending(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if est.Failed > 0 {
+		return fmt.Errorf("%d testbed files could not be embedded", est.Failed)
+	}
 	fmt.Printf("testbed: %d files, indexed %d in %v\n", n, st.Indexed, time.Since(start).Round(time.Millisecond))
 
 	cache := &search.VectorCache{}

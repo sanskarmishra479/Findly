@@ -53,15 +53,36 @@ func runIndex(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	// Start the model first: if its files are missing, no empty folder entry is left behind.
-	modelStart := time.Now()
-	if err := en.startEmbedder(ctx, ef, true); err != nil {
+	// Check the model first: if its files are missing, no empty folder entry is left
+	// behind. Then start it in the background (it takes seconds) while files are read:
+	// storing them for keyword search does not need it.
+	cfg, err := en.checkModel(ctx, ef, true)
+	if err != nil {
 		return err
 	}
-	modelTook := time.Since(modelStart)
+	type started struct {
+		err  error
+		took time.Duration
+	}
+	model := make(chan started, 1)
+	go func() {
+		s := time.Now()
+		err := en.launch(ctx, cfg)
+		model <- started{err, time.Since(s)}
+	}()
+	// Every return below waits for the start to finish, so close never races with it.
+	var m *started
+	waitModel := func() started {
+		if m == nil {
+			r := <-model
+			m = &r
+		}
+		return *m
+	}
+	defer waitModel()
+
 	ix := &index.Indexer{
 		Store:    en.store,
-		Embedder: en.emb,
 		Licensed: func() bool { return *unlimited },
 		OnProgress: func(p index.Progress) {
 			fmt.Fprintf(os.Stderr, "\rindexing %d / %d  (failed %d, over free limit %d)   ", p.Done, p.Total, p.Failed, p.Skipped)
@@ -87,11 +108,26 @@ func runIndex(args []string) error {
 	}
 	fmt.Printf("skipped:  %d secret-looking, %d cloud-only, %d links, %d too large, %d unreadable folders\n",
 		st.Scan.Secret, st.Scan.CloudOnly, st.Scan.Links, st.Scan.TooLarge, st.Scan.Errors)
-	fmt.Printf("time:     %v\n", time.Since(start).Round(time.Millisecond))
 	r := func(d time.Duration) time.Duration { return d.Round(100 * time.Millisecond) }
 	tm := st.Timing
-	fmt.Printf("          model start %v; extract %v (summed over workers); embed %v (%d passages); save %v; waiting for extraction %v\n",
-		r(modelTook), r(tm.Extract), r(tm.Embed), tm.Passages, r(tm.Save), r(tm.Total-tm.Embed-tm.Save))
+	fmt.Printf("keyword search ready after %v (extract %v summed over workers; save %v)\n",
+		r(time.Since(start)), r(tm.Extract), r(tm.Save))
+
+	// Second half: vectors for meaning search.
+	ms := waitModel()
+	if ms.err != nil {
+		return fmt.Errorf("starting the embedding model: %w", ms.err)
+	}
+	ix.Embedder = en.emb
+	est, err := ix.EmbedPending(ctx, func(p index.EmbedProgress) {
+		fmt.Fprintf(os.Stderr, "\rmeaning search: %d / %d passages   ", p.Passages, p.Waiting)
+	})
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("meaning search ready after %v (model start %v, in parallel; embed %v for %d passages; %d files copied from identical ones; %d files keyword-only after a model error)\n",
+		r(time.Since(start)), r(ms.took), r(est.Embed), est.Passages, est.Copied, est.Failed)
 	return nil
 }
 

@@ -307,3 +307,15 @@ Real folder: `C:\Users\sansk\OneDrive\Documents` (user's OK), Vulkan, separate t
   - `Close` retries its PostMessage if the queue is full, so it can't wait forever.
   - When adding the tray icon fails, a modify is tried. If it works the icon already exists and the retry timer stops, instead of retrying every 10 s for good.
   - Flaky test fixed: `TestHotkeyInUse` now waits until its helper has released the hotkey, and tests close a Desktop that `Start` returned together with an error. Before, one failure left a Desktop running and broke every later test.
+
+## Phase 3 — T3a keyword first (2026-10-13)
+- **Two steps instead of one.** `IndexRoot` now stores passages and keyword rows without calling the model, so files are keyword-searchable as soon as they are read. `Indexer.EmbedPending` (new) then adds vectors to every waiting passage, file by file in the order they were stored (the indexing priority order). It can be interrupted, and simply continues next time; vectors don't need a rescan.
+- **Schema migration 2:** `items.embed` (0 = nothing to do, 1 = waiting for its vector, 2 = the model failed on it), with a partial index `items_embed_pending ON items(id) WHERE embed = 1`. New store functions: `NextPendingFile`, `PendingItems`, `SetVectors`, `MarkEmbedFailed`, `CountPending`. `SetVectors` skips passages that were replaced or deleted meanwhile, so a slow embedding never brings back old content.
+- **Model failures no longer fail the file:**
+  - A file the model crashes on twice, or rejects as bad input, keeps its keyword search; only its meaning search is given up (`embed = 2`, reason in `files.error`).
+  - 3 crashing files in a row stop the pass (the server is broken), and a server error or timeout stops it with the passages left waiting. That is the same protection as before, now in the embedding pass.
+- **Dedupe:**
+  - When a file is stored, an identical file's content is copied, with its vectors or still waiting.
+  - The embedding pass copies vectors only from an identical file whose passages *all* have vectors (`CopyDuplicate(..., finishedOnly)`), never a waiting or failed state; otherwise one failure would silently spread to every copy.
+- **CLI `index`:** checks the model files and the index's model first (no empty folder entry when files are missing), then starts the model **in parallel** with reading the files. Measured on the 28-file test set: keyword search ready in < 0.05 s, meaning search after 7.2 s (model start 5 s in parallel, embedding 2.2 s).
+- **Evals unchanged:** Recall@5 1.000, MRR@10 0.976, negatives clean 0.75 at cutoff 0.64 / gap 0.06 (Vulkan).

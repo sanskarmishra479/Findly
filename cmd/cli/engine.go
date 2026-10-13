@@ -59,18 +59,20 @@ func openEngine(e engineFlags) (*engine, error) {
 	return &engine{fs: afs, store: st}, nil
 }
 
-// startEmbedder launches llama-server with the text model.
-func (en *engine) startEmbedder(ctx context.Context, e engineFlags, lowPriority bool) error {
+// checkModel verifies, quickly and before any work, that the model files exist and that
+// the index was built with this model. Vectors from different models must never be
+// mixed in one index.
+func (en *engine) checkModel(ctx context.Context, e engineFlags, lowPriority bool) (embed.Config, error) {
 	if e.backend != "cpu" && e.backend != "vulkan" {
-		return fmt.Errorf("unknown backend %q", e.backend)
+		return embed.Config{}, fmt.Errorf("unknown backend %q", e.backend)
 	}
 	tp, err := filepath.Abs(e.tpDir)
 	if err != nil {
-		return err
+		return embed.Config{}, err
 	}
 	gpuDir, err := en.fs.Path(appfs.DirGPU)
 	if err != nil {
-		return err
+		return embed.Config{}, err
 	}
 	cfg := embed.Config{
 		WorkDir:     gpuDir,
@@ -80,17 +82,30 @@ func (en *engine) startEmbedder(ctx context.Context, e engineFlags, lowPriority 
 	}
 	for _, p := range []string{cfg.ServerExe, cfg.Model} {
 		if _, err := os.Stat(p); err != nil {
-			return fmt.Errorf("missing %s (run scripts\\fetch-llama.ps1 and scripts\\fetch-model.ps1)", p)
+			return embed.Config{}, fmt.Errorf("missing %s (run scripts\\fetch-llama.ps1 and scripts\\fetch-model.ps1)", p)
 		}
 	}
+	return cfg, en.store.EnsureModel(ctx, embed.ModelVersion)
+}
+
+// startEmbedder launches llama-server with the text model.
+func (en *engine) startEmbedder(ctx context.Context, e engineFlags, lowPriority bool) error {
+	cfg, err := en.checkModel(ctx, e, lowPriority)
+	if err != nil {
+		return err
+	}
 	fmt.Fprintln(os.Stderr, "starting the embedding model…")
-	srv, err := embed.Start(ctx, cfg) // ctx: Ctrl+C also stops a slow model start
+	return en.launch(ctx, cfg)
+}
+
+// launch starts the server; ctx (Ctrl+C) also stops a slow model start.
+func (en *engine) launch(ctx context.Context, cfg embed.Config) error {
+	srv, err := embed.Start(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	en.emb = srv
-	// Vectors from different models must never be mixed in one index.
-	return en.store.EnsureModel(ctx, embed.ModelVersion)
+	return nil
 }
 
 func (en *engine) close() {

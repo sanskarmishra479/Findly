@@ -89,13 +89,33 @@ func (e *env) write(rel, content string) string {
 	return p
 }
 
+// run indexes like the app does: store all files (keyword-searchable), then add vectors.
 func (e *env) run() Stats {
+	e.t.Helper()
+	st := e.index()
+	if _, err := e.ix.EmbedPending(context.Background(), nil); err != nil {
+		e.t.Fatal(err)
+	}
+	return st
+}
+
+// index runs only the first half: files are stored and keyword-searchable.
+func (e *env) index() Stats {
 	e.t.Helper()
 	st, err := e.ix.IndexRoot(context.Background(), e.root)
 	if err != nil {
 		e.t.Fatal(err)
 	}
 	return st
+}
+
+func (e *env) pending() int {
+	e.t.Helper()
+	n, err := e.st.CountPending(context.Background())
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return n
 }
 
 func (e *env) file(rel string) store.File {
@@ -254,15 +274,22 @@ func TestEmbedderFailureStopsRun(t *testing.T) {
 	e := newEnv(t)
 	e.write("a.txt", "some text to embed")
 	e.emb.err = fmt.Errorf("%w: crashed 3 times", embed.ErrServer)
-	if _, err := e.ix.IndexRoot(context.Background(), e.root); !errors.Is(err, ErrEmbedder) {
+	if st := e.index(); st.Indexed != 1 {
+		t.Fatalf("storing the file needs no model: %+v", st)
+	}
+	if _, err := e.ix.EmbedPending(context.Background(), nil); !errors.Is(err, ErrEmbedder) {
 		t.Fatalf("got %v, want ErrEmbedder", err)
 	}
-	if f := e.file("a.txt"); f.Status == store.StatusFailed {
-		t.Fatal("file marked failed because the server died")
+	if f := e.file("a.txt"); f.Status == store.StatusFailed || f.Error != "" {
+		t.Fatalf("file blamed because the server died: %+v", f)
+	}
+	if e.pending() == 0 {
+		t.Fatal("passages must keep waiting for the next pass")
 	}
 	e.emb.err = nil
-	if st := e.run(); st.Indexed != 1 {
-		t.Fatalf("not indexed after recovery: %+v", st)
+	e.run()
+	if e.pending() != 0 {
+		t.Fatal("passages still waiting after recovery")
 	}
 }
 
@@ -362,17 +389,22 @@ func TestTransientEmbedErrorLeavesPending(t *testing.T) {
 	e := newEnv(t)
 	e.write("a.txt", "text to embed")
 	e.emb.err = errors.New("embed: request: connection reset")
-	if _, err := e.ix.IndexRoot(context.Background(), e.root); !errors.Is(err, ErrEmbedder) {
+	e.index()
+	if _, err := e.ix.EmbedPending(context.Background(), nil); !errors.Is(err, ErrEmbedder) {
 		t.Fatalf("got %v, want ErrEmbedder", err)
 	}
-	if f := e.file("a.txt"); f.Status != store.StatusPending {
-		t.Fatalf("status = %s, want pending", f.Status)
+	if e.pending() == 0 {
+		t.Fatal("a transient error gave up on the passages")
 	}
-	// An error about the input itself fails only that file.
+	// An error about the input itself gives up on that file only (it stays
+	// keyword-searchable).
 	e.emb.err = fmt.Errorf("%w: too long", embed.ErrInput)
-	st := e.run()
-	if st.Failed != 1 {
-		t.Fatalf("stats = %+v", st)
+	st, err := e.ix.EmbedPending(context.Background(), nil)
+	if err != nil || st.Failed != 1 || e.pending() != 0 {
+		t.Fatalf("stats = %+v, err = %v, pending = %d", st, err, e.pending())
+	}
+	if f := e.file("a.txt"); f.Status != store.StatusDone || f.Error == "" {
+		t.Fatalf("file = %+v, want done with the reason recorded", f)
 	}
 }
 
@@ -464,12 +496,19 @@ func TestCrashingFileIsSkipped(t *testing.T) {
 	e.write("a.txt", "fine text one")
 	e.write("bad.txt", "poison pill content")
 	e.write("c.txt", "fine text two")
-	st := e.run()
-	if st.Indexed != 2 || st.Failed != 1 {
+	if st := e.index(); st.Indexed != 3 {
 		t.Fatalf("stats = %+v", st)
 	}
-	if f := e.file("bad.txt"); f.Status != store.StatusFailed || !strings.Contains(f.Error, "crashed") {
+	st, err := e.ix.EmbedPending(context.Background(), nil)
+	if err != nil || st.Files != 2 || st.Failed != 1 {
+		t.Fatalf("embed stats = %+v, err = %v", st, err)
+	}
+	// The bad file keeps its keyword search; only meaning search is given up.
+	if f := e.file("bad.txt"); f.Status != store.StatusDone || !strings.Contains(f.Error, "crashed") {
 		t.Fatalf("bad file: %+v", f)
+	}
+	if e.pending() != 0 {
+		t.Fatal("the bad file would be retried forever")
 	}
 }
 
@@ -480,18 +519,19 @@ func TestServerCrashingOnEverythingStopsRun(t *testing.T) {
 	for i := range 6 {
 		e.write(fmt.Sprintf("p%d.txt", i), "poison everywhere")
 	}
-	_, err := e.ix.IndexRoot(context.Background(), e.root)
+	e.index()
+	_, err := e.ix.EmbedPending(context.Background(), nil)
 	if !errors.Is(err, ErrEmbedder) {
 		t.Fatalf("got %v, want ErrEmbedder", err)
 	}
-	failed := 0
+	blamed := 0
 	for i := range 6 {
-		if e.file(fmt.Sprintf("p%d.txt", i)).Status == store.StatusFailed {
-			failed++
+		if e.file(fmt.Sprintf("p%d.txt", i)).Error != "" {
+			blamed++
 		}
 	}
-	if failed >= maxCrashFiles {
-		t.Fatalf("%d files marked failed; the run should stop before blaming them all", failed)
+	if blamed >= maxCrashFiles {
+		t.Fatalf("%d files given up on; the pass should stop before blaming them all", blamed)
 	}
 }
 
@@ -501,7 +541,8 @@ func TestCancelDuringEmbedIsCancellation(t *testing.T) {
 	e.write("a.txt", "text")
 	ctx, cancel := context.WithCancel(context.Background())
 	e.ix.Embedder = cancelEmbedder{cancel}
-	_, err := e.ix.IndexRoot(ctx, e.root)
+	e.index()
+	_, err := e.ix.EmbedPending(ctx, nil)
 	if !errors.Is(err, context.Canceled) || errors.Is(err, ErrEmbedder) {
 		t.Fatalf("got %v, want context.Canceled (not ErrEmbedder)", err)
 	}
@@ -581,5 +622,38 @@ func TestAddRootRefusesPrivateFolder(t *testing.T) {
 	roots, _ := e.st.Roots(context.Background())
 	if len(roots) != 1 {
 		t.Fatalf("secret folder was saved: %+v", roots)
+	}
+}
+
+// P3-T3 keyword first: storing a file makes it keyword-searchable without the model;
+// the embedding pass adds vectors afterwards, in priority order, and reports progress.
+func TestKeywordFirstThenVectors(t *testing.T) {
+	e := newEnv(t)
+	e.write("old/report.txt", "the quarterly budget report")
+	e.write("notes.txt", "meeting notes about budgets")
+	e.index()
+	if len(e.emb.texts) != 0 {
+		t.Fatalf("the model was called while storing: %q", e.emb.texts)
+	}
+	hits, err := e.st.KeywordSearch(context.Background(), `"quarterly"`, store.Filter{}, 10, true)
+	if err != nil || len(hits) != 1 {
+		t.Fatalf("keyword search before vectors: %v %v", hits, err)
+	}
+	waiting := e.pending()
+	if waiting == 0 {
+		t.Fatal("nothing waiting for vectors")
+	}
+	var last EmbedProgress
+	st, err := e.ix.EmbedPending(context.Background(), func(p EmbedProgress) { last = p })
+	if err != nil || st.Files != 2 || e.pending() != 0 {
+		t.Fatalf("embed: %+v %v, pending %d", st, err, e.pending())
+	}
+	if last.Files != 2 || last.Passages != waiting || last.Waiting != waiting {
+		t.Fatalf("progress = %+v, want 2 files and %d passages", last, waiting)
+	}
+	// Nothing left: a second pass does no work.
+	n := len(e.emb.texts)
+	if st, err := e.ix.EmbedPending(context.Background(), nil); err != nil || st.Files != 0 || len(e.emb.texts) != n {
+		t.Fatalf("second pass did work: %+v %v", st, err)
 	}
 }

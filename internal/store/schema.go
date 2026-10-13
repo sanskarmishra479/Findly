@@ -89,4 +89,13 @@ CREATE TABLE thumbs (
   path     TEXT NOT NULL
 );
 `,
+	// 2: keyword first (P3-T3). A file's passages are stored (and keyword-searchable) as
+	// soon as its text is read; vectors are added by a second pass. embed tracks that:
+	// 0 = nothing to do (has a vector, or keyword-only by design), 1 = waiting for its
+	// vector, 2 = the embedding model failed on it (not retried).
+	`
+ALTER TABLE items ADD COLUMN embed INTEGER NOT NULL DEFAULT 0;
+-- Waiting passages in the order they were stored, which is the indexing priority order.
+CREATE INDEX items_embed_pending ON items(id) WHERE embed = 1;
+`,
 }
