@@ -48,6 +48,10 @@ type App struct {
 	modelNote     string           // where the search model was found, or why not
 	throttle      statusThrottle   // limits tooltip updates during indexing
 	quitting      bool             // shutdown has started
+
+	searches  searches     // cancels outdated searches while the user types
+	previews  previewCalls // cancels an outdated preview
+	pageCache pageCache    // recently rendered PDF pages
 }
 
 func newApp(fs *appfs.FS) *App {

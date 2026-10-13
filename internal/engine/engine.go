@@ -111,6 +111,10 @@ func Open(cfg Config) (*Engine, error) {
 	if cfg.retryAfter == 0 {
 		cfg.retryAfter = 5 * time.Minute
 	}
+	// PDF engines keep their compiled code here: starting one takes 0.2 s instead of 6 s.
+	if dir, err := cfg.FS.Path(filepath.Join(appfs.DirCache, "wasm")); err == nil {
+		extract.SetCompileCache(dir) // best effort: without it PDFs still work, just slower to start
+	}
 	dbPath, err := cfg.FS.Path(filepath.Join(appfs.DirIndex, "index.db"))
 	if err != nil {
 		return nil, err
@@ -155,6 +159,7 @@ func (e *Engine) Close() {
 	e.pool.close() // also cancels a model start in progress, so quitting never waits for it
 	<-e.done
 	extract.ClosePDF()
+	extract.ClosePreviews()
 	e.store.Close()
 }
 

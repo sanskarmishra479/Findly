@@ -67,16 +67,13 @@ func pdfEngine() (pdfium.Pool, error) {
 		return pdfPool, nil
 	}
 	pool, err := webassembly.Init(webassembly.Config{
-		MinIdle:  0,
-		MaxIdle:  pdfEngines,
-		MaxTotal: pdfEngines,
-		FSConfig: wazero.NewFSConfig(), // empty: nothing mounted (the default mounts the whole drive)
-		Stdout:   io.Discard,
-		Stderr:   io.Discard,
-		RuntimeConfig: wazero.NewRuntimeConfig().
-			WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling).
-			WithMemoryLimitPages(pdfMemoryPages).
-			WithCloseOnContextDone(true),
+		MinIdle:       0,
+		MaxIdle:       pdfEngines,
+		MaxTotal:      pdfEngines,
+		FSConfig:      wazero.NewFSConfig(), // empty: nothing mounted (the default mounts the whole drive)
+		Stdout:        io.Discard,
+		Stderr:        io.Discard,
+		RuntimeConfig: runtimeConfig(pdfMemoryPages),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("extract: PDF engine: %w", err)
@@ -225,3 +222,37 @@ var (
 	readPDF   = func(path string) ([]byte, error) { return safefs.ReadFile(path, MaxPDFFile) }
 	pdfTextFn = pdfText
 )
+
+var (
+	cacheMu sync.Mutex
+	cache   wazero.CompilationCache
+)
+
+// SetCompileCache makes the PDF engines keep their compiled machine code in dir (inside
+// the app folder), so starting an engine takes well under a second instead of ~6 s
+// (WebAssembly is compiled once per version, not on every start). Call it before the
+// first PDF; without it every start compiles from scratch.
+func SetCompileCache(dir string) error {
+	c, err := wazero.NewCompilationCacheWithDir(dir)
+	if err != nil {
+		return fmt.Errorf("extract: PDF compile cache: %w", err)
+	}
+	cacheMu.Lock()
+	cache = c
+	cacheMu.Unlock()
+	return nil
+}
+
+// runtimeConfig is the sandbox configuration shared by both PDF engines.
+func runtimeConfig(memoryPages uint32) wazero.RuntimeConfig {
+	rc := wazero.NewRuntimeConfig().
+		WithCoreFeatures(api.CoreFeaturesV2 | experimental.CoreFeaturesExceptionHandling).
+		WithMemoryLimitPages(memoryPages).
+		WithCloseOnContextDone(true)
+	cacheMu.Lock()
+	defer cacheMu.Unlock()
+	if cache != nil {
+		rc = rc.WithCompilationCache(cache)
+	}
+	return rc
+}

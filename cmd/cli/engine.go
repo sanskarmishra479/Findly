@@ -46,6 +46,9 @@ func openEngine(e engineFlags) (*engine, error) {
 	if err != nil {
 		return nil, err
 	}
+	if dir, err := afs.Path(filepath.Join(appfs.DirCache, "wasm")); err == nil {
+		extract.SetCompileCache(dir) // PDF engine starts in 0.2 s instead of 6 s
+	}
 	dbPath, err := afs.Path("index/index.db")
 	if err != nil {
 		afs.Close()

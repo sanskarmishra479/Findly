@@ -360,3 +360,12 @@ Real folder: `C:\Users\sansk\OneDrive\Documents` (user's OK), Vulkan, separate t
   - The cache's dirty mark is cleared only after a successful reload.
   - Accepted (pre-existing): `pool.drop()` after a model error also closes the model under a search holding a lease; that search gets an error and the next one starts a fresh model.
 - **Last T3 review (f7d85e8):** a pause or a new-folder interrupt during the model check is now reported as such (`ctx.Err()`), not as a model failure; before, it counted as an error, doubled the retry delay and dropped the model. A failed vector-cache reload now marks the cache dirty, so the next reload retries it. Accepted: a model that answers the short check but fails every real request gives up files slowly (one every couple of passes, with backoff); they stay keyword-searchable. Measured with a randomly failing model: 50% failures blamed 3% of good files, 30% blamed under 1%, 10% none.
+
+## Phase 3 — T4a/b search and previews for the panel (2026-10-13)
+- **`App.Search(seq, query, meaning)`:** word matches (`meaning=false`, fast enough for every keystroke) or words + meaning merged (`meaning=true`, leases the model through `engine.QueryModel`). A new search cancels the previous one of the same kind, and `seq` lets the UI drop outdated answers. Results carry what the design needs: name, folder (user folder shown as `~`), kind, size, date, page, snippet, words/meaning/exact flags, the query words for bold text, and the best passage's id for the preview.
+- **`App.Preview(seq, id, itemID, query)`:**
+  - **PDF:** the page is rendered at 760 px wide (sharp at 2×) by a separate small PDF engine (256 MiB cap, 10 s limit, same sandbox and crash protection), so a preview never waits behind indexing. The query's whole words are highlighted from the character positions PDFium reports, and the picture is cropped around the first highlight, like the reference.
+  - **Images:** read through safefs and scaled to 760 px; nothing over 40 MB or 50 megapixels, and only standard JPEG/PNG/GIF (no new library).
+  - **Text/Word:** the matching passage.
+  - A newer preview cancels an older one; the last 24 rendered pages are cached in memory.
+- **PDF compile cache:** wazero's compilation cache in `%LOCALAPPDATA%\Findly\cache\wasm` (`appfs.DirCache`). Starting a PDF engine went from **6.0 s to 0.16 s** (measured). It is used by both engines, so indexing benefits too. The cache can always be rebuilt, and it is in the app folder (I-3).
