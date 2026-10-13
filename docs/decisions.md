@@ -302,3 +302,8 @@ Real folder: `C:\Users\sansk\OneDrive\Documents` (user's OK), Vulkan, separate t
   - A failed tray-icon add is retried every 10 s (`SetTimer`), not only on Explorer's TaskbarCreated. Otherwise, with the hotkey also taken, Findly would be unreachable without any message.
   - TEMP is also restored at the end of `startup`: the WebView2 browser process exists by then, so the restore no longer depends on the page finishing loading.
   - Esc also ignores `keyCode 229` (IMEs that do not set `isComposing`).
+- **Last T2 review (2d1690b):**
+  - The message loop ends only after Close's own cleanup has destroyed the window (`destroyed`, set right after `DestroyWindow`). An outside WM_QUIT racing with Close used to end the loop first, leaving the hotkey registered, a ghost tray icon and the hook installed. The new test `TestCloseRacingOutsideQuit` fails on the old code.
+  - `Close` retries its PostMessage if the queue is full, so it can't wait forever.
+  - When adding the tray icon fails, a modify is tried. If it works the icon already exists and the retry timer stops, instead of retrying every 10 s for good.
+  - Flaky test fixed: `TestHotkeyInUse` now waits until its helper has released the hotkey, and tests close a Desktop that `Start` returned together with an error. Before, one failure left a Desktop running and broke every later test.

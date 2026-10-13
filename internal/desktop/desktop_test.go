@@ -74,9 +74,11 @@ func TestHotkeyInUse(t *testing.T) {
 	// Another "program" holds the hotkey: register it on a separate thread first.
 	held := make(chan struct{})
 	release := make(chan struct{})
+	released := make(chan struct{})
 	go func() {
 		runtime.LockOSThread()
 		defer runtime.UnlockOSThread()
+		defer close(released)
 		r, _, e := procRegisterHotKey.Call(0, 7, testHotkey.mods(), uintptr(testHotkey.Key))
 		if r == 0 {
 			t.Errorf("setup RegisterHotKey: %v", e)
@@ -86,16 +88,35 @@ func TestHotkeyInUse(t *testing.T) {
 		procUnregisterHotKey.Call(0, 7)
 	}()
 	<-held
-	defer close(release)
+	// Give the hotkey back before the next test starts, or it sees "in use" too.
+	defer func() { close(release); <-released }()
 
 	d, err := Start(Options{Hotkey: testHotkey, NoTrayIcon: true})
+	if d != nil {
+		defer d.Close() // also on a failed check: a leftover Desktop breaks later tests
+	}
 	if !errors.Is(err, ErrHotkeyInUse) {
 		t.Fatalf("got %v, want ErrHotkeyInUse", err)
 	}
 	if d == nil {
 		t.Fatal("the tray must keep running when only the hotkey is taken")
 	}
-	d.Close()
+}
+
+// An outside WM_QUIT racing with Close must not skip Close's cleanup: afterwards the
+// hotkey is free again, so a new Desktop can register it.
+func TestCloseRacingOutsideQuit(t *testing.T) {
+	for i := range 50 {
+		d, err := Start(Options{Hotkey: testHotkey, NoTrayIcon: true})
+		if err != nil {
+			t.Fatalf("round %d: %v", i, err)
+		}
+		go procPostMessageW.Call(uintptr(d.hwnd), 0x0012 /* WM_QUIT */, 0, 0)
+		d.Close()
+		if ok, _, _ := procIsWindow.Call(uintptr(d.hwnd)); ok != 0 {
+			t.Fatalf("round %d: the window survived Close", i)
+		}
+	}
 }
 
 func TestOnlyOneDesktop(t *testing.T) {

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode/utf16"
 	"unsafe"
 
@@ -77,6 +78,7 @@ type Desktop struct {
 	winEventHook   uintptr // foreground-change hook, 0 if none
 	icon           windows.Handle
 	closing        atomic.Bool // set by Close; nothing else may end the desktop
+	destroyed      bool        // the window was destroyed by Close (desktop thread only)
 }
 
 const (
@@ -145,8 +147,13 @@ func (d *Desktop) Close() {
 	// Only this flag ends the desktop. Messages alone can't: any program can post
 	// WM_QUIT, WM_DESTROY or our private close message to a top-level window.
 	d.closing.Store(true)
-	if !d.closed() {
-		procPostMessageW.Call(uintptr(d.hwnd), msgClose, 0, 0)
+	// PostMessage fails only when the thread's queue is full (10,000 messages): keep
+	// trying until it is accepted or the desktop has ended, so Close never waits forever.
+	for !d.closed() {
+		if r, _, _ := procPostMessageW.Call(uintptr(d.hwnd), msgClose, 0, 0); r != 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 	<-d.done
 }
@@ -185,7 +192,7 @@ func (d *Desktop) loop(ready chan<- error) {
 			return
 		}
 		if r == 0 { // WM_QUIT
-			if d.closing.Load() {
+			if d.destroyed { // only after our own cleanup ran (msgClose below)
 				return
 			}
 			continue // posted by another program: the tray and hotkey must stay
@@ -236,7 +243,10 @@ func (d *Desktop) addIcon() {
 	if d.opts.NoTrayIcon {
 		return
 	}
-	if d.notify(nimAdd) == nil {
+	// An add fails when the icon already exists (an earlier add that reported a timeout
+	// but worked, or a TaskbarCreated/WM_TIMER posted by another program). A modify
+	// succeeds exactly when it exists, which also ends the retries.
+	if d.notify(nimAdd) == nil || d.notify(nimModify) == nil {
 		procKillTimer.Call(uintptr(d.hwnd), trayTimerID)
 		return
 	}
@@ -342,6 +352,9 @@ func wndProc(hwnd, message, wParam, lParam uintptr) uintptr {
 			d.notify(nimDelete)
 		}
 		procDestroyWindow.Call(hwnd)
+		// DestroyWindow sent WM_DESTROY (which posts the WM_QUIT) before returning. Only now
+		// may the loop end: an outside WM_QUIT arriving earlier must not skip this cleanup.
+		d.destroyed = true
 		return 0
 	case wmClose:
 		return 0 // only Close() ends the desktop window (it is never shown, so no user closes it)
