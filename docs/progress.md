@@ -35,3 +35,14 @@
 ## Notes for later phases
 - Phase 4: deferred job for partial PDFs (pages after 30); needs a `last_page` column (new migration).
 - Existing llama.cpp installs have no `.verified` marker yet: the next `scripts\fetch-llama.ps1` run downloads them once more (≈53 MB).
+
+## Phase 3 — Desktop app (built before Phase 2)
+- [x] T1 Wails v2 skeleton: `app/` + `app/frontend/`, pinned deps, WebView data in the app folder, single instance, CSP, starts hidden
+- [ ] T2 Tray icon + global hotkey
+- [ ] T3 Engine service (background indexing, model lifetime, keyword-first indexing)
+- [ ] T4 Search panel (keyword-first + meaning merge, keyboard navigation)
+- [ ] T5 Opener (open, PDF at page, show in Explorer, copy file)
+- [ ] T6 Model download + onboarding
+- [ ] T7 Settings + basic big window
+- [ ] T8 Backend auto-selection (Vulkan vs CPU)
+- [ ] Acceptance

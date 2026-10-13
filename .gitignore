@@ -11,7 +11,9 @@
 
 # Frontend
 node_modules/
-frontend/dist/
+app/frontend/dist/*
+!app/frontend/dist/.gitkeep
+/app/build/bin/
 
 # Secrets — never commit the license private key
 *.key
@@ -24,3 +26,4 @@ server/activation-worker/.dev.vars
 .idea/
 *.log
 Thumbs.db
+app/frontend/package.json.md5

@@ -36,6 +36,9 @@ const (
 	// drivers write logs and shader caches relative to it, and they must stay inside the
 	// app data folder (plan I-3), not in the install folder.
 	DirGPU = "gpu"
+	// DirWebview holds WebView2's browser data for the app window. WebView2 writes it
+	// itself; without this setting it would go to %APPDATA%, outside the app folder.
+	DirWebview = "webview"
 )
 
 // ErrOutside is returned for paths that are absolute or leave the app directory.
@@ -69,7 +72,7 @@ func Open(dir string) (*FS, error) {
 		return nil, err
 	}
 	f := &FS{root: root, path: filepath.Clean(dir)}
-	for _, sub := range []string{DirModels, DirIndex, DirThumbs, DirLogs, DirBin, DirLicense, DirGPU} {
+	for _, sub := range []string{DirModels, DirIndex, DirThumbs, DirLogs, DirBin, DirLicense, DirGPU, DirWebview} {
 		if err := root.MkdirAll(sub, 0o700); err != nil {
 			root.Close()
 			return nil, err

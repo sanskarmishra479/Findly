@@ -134,6 +134,7 @@ Built on **Google DeepMind's EmbeddingGemma 2** (open model, Apache 2.0), run lo
 - **Main app** is always running (tray).
 - **llama-server (indexing mode)**: started when there is indexing work; loaded with the modalities needed; stopped after 60 s idle.
 - **llama-server (search mode)**: text-only, started when the app launches or the hotkey is first pressed; kept warm while the panel is open; unloaded after ~2 min idle. VERIFY whether one server instance can serve both roles efficiently; if so, use one.
+  - **Decided (2026-10-13, user):** never kept loaded permanently, to keep the PC light. Measured: ~0.1 s per search while loaded; ~4 s (≈7 s after a reboot) to reload after idle. Keyword results show instantly meanwhile, and loading starts on the hotkey press.
 - **ocr-helper**: started on demand, kept alive while indexing images, stopped when idle.
 - **ffmpeg**: one process per media file job.
 - All sidecars: started with low process priority during indexing (`BELOW_NORMAL_PRIORITY_CLASS`), restarted automatically on crash (max 3 retries, then mark the item failed and continue).
@@ -146,8 +147,8 @@ Built on **Google DeepMind's EmbeddingGemma 2** (open model, Apache 2.0), run lo
 findly/
 ├─ cmd/
 │  └─ cli/                 # dev CLI: index, search, eval, bench
-├─ app/                    # Wails app entry, bindings exposed to UI
-├─ frontend/               # React + TS (Vite)
+├─ app/                    # Wails app entry, bindings exposed to UI (Wails project root)
+│  └─ frontend/            # React + TS (Vite); inside app/ because go:embed cannot reach a parent folder
 ├─ internal/
 │  ├─ appfs/               # writes, ONLY inside app data dir (I-3)
 │  ├─ safefs/              # read-only access to user files (I-1, I-2, I-4, I-5)
@@ -517,6 +518,8 @@ Measure with `cmd/cli bench` (Section 14.5). Record results in `docs/decisions.m
 ---
 
 ## 13. Phases, tasks and acceptance criteria
+
+> **Order changed (2026-10-13, user decision):** Phase 3 (desktop app) is built before Phase 2 (images + OCR), so the app can be used early; Phase 2 plugs into it afterwards.
 
 ### Phase 0 — Model spike on Windows (2–3 days)
 **Tasks**
