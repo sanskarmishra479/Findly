@@ -391,6 +391,13 @@ func (c *VectorCache) Load(ctx context.Context, st *store.Store) error {
 	return nil
 }
 
+// Len returns the number of cached vectors (passages searchable by meaning).
+func (c *VectorCache) Len() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.items)
+}
+
 // Scored is a candidate item with its int8 similarity.
 type Scored struct {
 	ItemID int64

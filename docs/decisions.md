@@ -319,3 +319,17 @@ Real folder: `C:\Users\sansk\OneDrive\Documents` (user's OK), Vulkan, separate t
   - The embedding pass copies vectors only from an identical file whose passages *all* have vectors (`CopyDuplicate(..., finishedOnly)`), never a waiting or failed state; otherwise one failure would silently spread to every copy.
 - **CLI `index`:** checks the model files and the index's model first (no empty folder entry when files are missing), then starts the model **in parallel** with reading the files. Measured on the 28-file test set: keyword search ready in < 0.05 s, meaning search after 7.2 s (model start 5 s in parallel, embedding 2.2 s).
 - **Evals unchanged:** Recall@5 1.000, MRR@10 0.976, negatives clean 0.75 at cutoff 0.64 / gap 0.06 (Vulkan).
+
+## Phase 3 — T3b engine (2026-10-13)
+- **`internal/engine`** (new) is the app's background service. It owns the index, the vector cache and the model, and runs all indexing on one worker goroutine.
+- **Work order:** queued folders are stored first (keyword search grows at once); vectors are added when no folder is waiting. New folder work cancels the embedding pass, which continues afterwards (it is resumable), so new files never wait behind vectors for old ones.
+- **Model lifetime (`modelPool`):** at most one model process, serving both indexing and search.
+  - A start is shared: concurrent callers wait for the same start.
+  - Indexing starts the model as soon as the first file has been stored (in parallel with reading the rest), at below-normal priority. A search starts it at normal priority.
+  - It stops IndexIdle (60 s) after the last indexing use and SearchIdle (2 min) after the last search; it is never kept loaded for good (user decision).
+  - A broken model is dropped, so the next attempt starts a fresh one.
+- **Errors:** the status goes to "error" with the message, the passages keep waiting, and the work is retried after 5 minutes (and on the next start or Resume).
+- **Pause/Resume:** Pause cancels the current run; its leftover progress reports cannot overwrite "paused". Resume re-queues all folders (unchanged files are skipped quickly).
+- **No model yet** (before the T6 download): keyword search only; passages wait.
+- The vector cache is reloaded after each embedding pass, every 30 s during long ones, and after deletions. `VectorCache.Len` is back (used now).
+- Tests: a fake model (instant, blocking, or failing). 6 tests pass 10 times in a row under `-race`.
