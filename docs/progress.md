@@ -1,4 +1,4 @@
-﻿# Progress
+# Progress
 
 ## Setup
 - [x] Git repo + GitHub remote
