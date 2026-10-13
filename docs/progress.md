@@ -1,10 +1,10 @@
-# Progress
+﻿# Progress
 
 ## Setup
 - [x] Git repo + GitHub remote
 - [x] Go module `github.com/sanskarmishra479/findly`
 
-## Phase 0 — Model spike
+## Phase 0 â€” Model spike
 - [x] T1 `scripts/fetch-llama.ps1` (pinned b11552, CPU + Vulkan, SHA-256 verified)
 - [x] T2 `scripts/fetch-model.ps1` (Q8_0 text + mmproj, SHA-256 verified)
 - [x] T3 llama-server flags + request formats for text / image / audio (docs/decisions.md)
@@ -14,12 +14,12 @@
 - [x] T7 Timings on dev PC (i5-12450H + RTX 2050)
 - [ ] T7b Timings on a low-end PC (optional, when one is available)
 
-## Phase 1 — Text engine CLI
+## Phase 1 â€” Text engine CLI
 - [x] T1 `safefs` (read-only, share flags, cloud-only + link skip, long paths) + `appfs` (os.Root, atomic writes) with tests
 - [x] T1b Go toolchain 1.27.2 required in go.mod; govulncheck clean
 - [x] T2 `store` (SQLite schema, migrations, cascade deletes incl. FTS, vectors, free-tier count)
 - [x] T3 `scan` (skip rules, secrets, code projects, excludes, counts)
-- [x] T4 `extract` — txt, md, csv, log, json, html, docx, odt, rtf + PDF (go-pdfium wasm, sandboxed)
+- [x] T4 `extract` â€” txt, md, csv, log, json, html, docx, odt, rtf + PDF (go-pdfium wasm, sandboxed)
 - [x] T5 `chunk`, `embed`, `vecfmt` (+ `sidecar`)
 - [x] T6 `index` (pipeline, priorities, dedupe, deletions, free tier)
 - [x] T7 `search` (keyword + semantic + RRF + exact boost, filters)
@@ -34,13 +34,13 @@
 
 ## Notes for later phases
 - Phase 4: deferred job for partial PDFs (pages after 30); needs a `last_page` column (new migration).
-- Existing llama.cpp installs have no `.verified` marker yet: the next `scripts\fetch-llama.ps1` run downloads them once more (≈53 MB).
+- Existing llama.cpp installs have no `.verified` marker yet: the next `scripts\fetch-llama.ps1` run downloads them once more (â‰ˆ53 MB).
 
-## Phase 3 — Desktop app (built before Phase 2)
+## Phase 3 â€” Desktop app (built before Phase 2)
 - [x] T1 Wails v2 skeleton: `app/` + `app/frontend/`, pinned deps, WebView data in the app folder, single instance, CSP, starts hidden
 - [x] T2 Tray icon + global hotkey (+ T1 review fixes)
 - [x] Decided: accept WebView2's own connection to Microsoft at start, documented in plan O-1 (revisit with Wails v3)
-- [ ] T3 Engine service: [x] T3a keyword first, [x] T3b engine, [ ] T3c app wiring
+- [x] T3 Engine service: [x] T3a keyword first, [x] T3b engine, [x] T3c app wiring
 - [ ] T4 Search panel (keyword-first + meaning merge, keyboard navigation)
 - [ ] T5 Opener (open, PDF at page, show in Explorer, copy file)
 - [ ] T6 Model download + onboarding

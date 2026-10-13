@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { HidePanel, Info } from "../wailsjs/go/main/App";
+import { HidePanel, IndexStatus, Info } from "../wailsjs/go/main/App";
 import { EventsOn } from "../wailsjs/runtime/runtime";
 
 // The hotkey search panel (plan 10.2). Results arrive in T4.
@@ -9,14 +9,23 @@ import { EventsOn } from "../wailsjs/runtime/runtime";
 export function Panel() {
   const [query, setQuery] = useState("");
   const [warning, setWarning] = useState("");
+  const [indexError, setIndexError] = useState("");
+  const [status, setStatus] = useState("");
   const input = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    // Startup runs in parallel with the page: every value may also arrive later as an
+    // event, so an answer from Info never clears what an event already set.
     Info().then((i) => {
-      if (i.hotkeyWarning) setWarning(i.hotkeyWarning); // never clear a warning the event set
+      if (i.hotkeyWarning) setWarning(i.hotkeyWarning);
+      if (i.indexError) setIndexError(i.indexError);
     });
-    // The warning can be set after the page asked: startup runs in parallel.
+    IndexStatus().then((s) => {
+      if (s) setStatus((cur) => cur || s);
+    });
     const offWarning = EventsOn("hotkey:warning", (w: string) => setWarning(w));
+    const offIndexError = EventsOn("engine:error", (m: string) => setIndexError(m));
+    const offStatus = EventsOn("engine:status", (s: string) => setStatus(s));
     // Each time the panel is shown, start from the input with the old text selected,
     // so typing replaces it.
     const off = EventsOn("panel:shown", () => {
@@ -37,6 +46,8 @@ export function Panel() {
     return () => {
       off();
       offWarning();
+      offIndexError();
+      offStatus();
       window.removeEventListener("keydown", onKey);
     };
   }, []);
@@ -59,12 +70,13 @@ export function Panel() {
         />
       </div>
       <div className="results">
+        {indexError && <p className="warning">{indexError}</p>}
         {warning && <p className="warning">{warning}</p>}
         <p className="hint">Results will appear here.</p>
       </div>
       <footer>
         <span>Enter open · Esc close</span>
-        <span>Findly</span>
+        <span className="status">{status || "Findly"}</span>
       </footer>
     </div>
   );

@@ -41,14 +41,15 @@ const (
 
 // Status is reported to the UI (tray tooltip, progress).
 type Status struct {
-	State State
-	Root  string // folder being indexed
-	Done  int    // files finished in this folder
-	Total int    // files to process in this folder
+	State State  `json:"state"`
+	Root  string `json:"root"`  // folder being indexed
+	Done  int    `json:"done"`  // files finished in this folder
+	Total int    `json:"total"` // files to process in this folder
 	// Embedding progress: passages that got vectors so far, out of those waiting.
-	Passages, Waiting int
-	Model             bool   // the embedding model is loaded
-	Err               string // last error, for StateError
+	Passages int    `json:"passages"`
+	Waiting  int    `json:"waiting"`
+	Model    bool   `json:"model"` // the embedding model is loaded
+	Err      string `json:"err"`   // last error, for StateError
 }
 
 // Config configures an Engine.

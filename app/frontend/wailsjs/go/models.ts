@@ -4,6 +4,8 @@ export namespace main {
 	    version: string;
 	    hotkeyWarning: string;
 	    dataDir: string;
+	    indexError: string;
+	    modelNote: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Info(source);
@@ -14,6 +16,8 @@ export namespace main {
 	        this.version = source["version"];
 	        this.hotkeyWarning = source["hotkeyWarning"];
 	        this.dataDir = source["dataDir"];
+	        this.indexError = source["indexError"];
+	        this.modelNote = source["modelNote"];
 	    }
 	}
 

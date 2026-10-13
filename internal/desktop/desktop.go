@@ -57,6 +57,10 @@ type Options struct {
 	OnHotkey func() // the hotkey was pressed
 	OnOpen   func() // tray icon clicked, or "Open search" chosen
 	OnQuit   func() // "Quit Findly" chosen
+	// OnTogglePause, if set, adds "Pause indexing" / "Resume indexing" (Paused picks the
+	// label; it is called on the desktop thread and must return quickly).
+	OnTogglePause func()
+	Paused        func() bool
 	// NoTrayIcon skips the tray icon (tests: Windows permanently remembers every program
 	// that ever showed one, in Settings > Taskbar).
 	NoTrayIcon bool
@@ -89,8 +93,9 @@ const (
 	msgClose      = wmApp + 3 // private: a WM_CLOSE from another program must not remove the tray
 	trayTimerID   = 1         // retries adding the tray icon
 
-	cmdOpen = 1
-	cmdQuit = 2
+	cmdOpen  = 1
+	cmdQuit  = 2
+	cmdPause = 3
 )
 
 var (
@@ -401,6 +406,13 @@ func (d *Desktop) showMenu() {
 	}
 	defer procDestroyMenu.Call(menu)
 	appendItem(menu, cmdOpen, "Open search")
+	if d.opts.OnTogglePause != nil {
+		label := "Pause indexing"
+		if d.opts.Paused != nil && d.opts.Paused() {
+			label = "Resume indexing"
+		}
+		appendItem(menu, cmdPause, label)
+	}
 	procAppendMenuW.Call(menu, mfSeparator, 0, 0)
 	appendItem(menu, cmdQuit, "Quit Findly")
 
@@ -417,6 +429,8 @@ func (d *Desktop) showMenu() {
 		d.call(d.opts.OnOpen)
 	case cmdQuit:
 		d.call(d.opts.OnQuit)
+	case cmdPause:
+		d.call(d.opts.OnTogglePause)
 	}
 }
 

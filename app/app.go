@@ -3,14 +3,18 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/sanskarmishra479/findly/internal/appfs"
 	"github.com/sanskarmishra479/findly/internal/desktop"
+	"github.com/sanskarmishra479/findly/internal/engine"
+	"github.com/sanskarmishra479/findly/internal/store"
 )
 
 // Version is the app version shown in About.
@@ -39,9 +43,15 @@ type App struct {
 	mu            sync.Mutex
 	desktop       *desktop.Desktop // tray icon and hotkey
 	hotkeyWarning string           // set when another program owns the hotkey
+	engine        *engine.Engine   // nil until opened, or if it could not be opened
+	engineErr     string           // why the index could not be opened
+	modelNote     string           // where the search model was found, or why not
+	throttle      statusThrottle   // limits tooltip updates during indexing
 }
 
-func newApp(fs *appfs.FS) *App { return &App{fs: fs} }
+func newApp(fs *appfs.FS) *App {
+	return &App{fs: fs, throttle: statusThrottle{interval: 250 * time.Millisecond}}
+}
 
 // context returns the Wails context, or nil before startup.
 func (a *App) context() context.Context {
@@ -54,12 +64,14 @@ func (a *App) context() context.Context {
 func (a *App) startup(ctx context.Context) {
 	a.ctx.Store(&ctx)
 	d, err := desktop.Start(desktop.Options{
-		Tooltip:      "Findly: Ctrl+Shift+Space to search",
-		Hotkey:       desktop.DefaultHotkey,
-		OnHotkey:     a.ShowPanel,
-		OnOpen:       a.ShowPanel,
-		OnQuit:       func() { runtime.Quit(ctx) },
-		OnForeground: a.foreground,
+		Tooltip:       "Findly: Ctrl+Shift+Space to search",
+		Hotkey:        desktop.DefaultHotkey,
+		OnHotkey:      a.ShowPanel,
+		OnOpen:        a.ShowPanel,
+		OnQuit:        func() { runtime.Quit(ctx) },
+		OnForeground:  a.foreground,
+		OnTogglePause: a.togglePause,
+		Paused:        a.paused,
 	})
 	switch {
 	case errors.Is(err, desktop.ErrHotkeyInUse):
@@ -86,12 +98,100 @@ func (a *App) startup(ctx context.Context) {
 	if a.onDomReady != nil {
 		a.onDomReady()
 	}
+	a.openEngine(ctx)
+}
+
+// openEngine opens the index and starts keeping the chosen folders up to date. Indexing
+// runs in the background; the app never waits for it.
+func (a *App) openEngine(ctx context.Context) {
+	start, note := modelStarter(a.fs)
+	eng, err := engine.Open(engine.Config{FS: a.fs, StartModel: start, OnStatus: a.engineStatus})
+	a.mu.Lock()
+	a.modelNote = note
+	if err != nil {
+		a.engineErr = engineMessage(err)
+		a.mu.Unlock()
+		a.setTooltip("Findly: the index needs attention. Open search for details")
+		runtime.EventsEmit(ctx, "engine:error", a.engineErr)
+		return
+	}
+	a.engine = eng
+	a.mu.Unlock()
+	eng.IndexAll()
+}
+
+// engineMessage explains why the index could not be opened, in the user's terms. The
+// user's files are never affected (plan I-7).
+func engineMessage(err error) string {
+	switch {
+	case errors.Is(err, store.ErrModelChanged):
+		return "This version of Findly uses a new search model, so the index must be rebuilt. Your files are not affected."
+	case store.IsCorrupt(err):
+		return "The search index is damaged and must be rebuilt. Your files are not affected."
+	default:
+		return "The search index could not be opened: " + err.Error()
+	}
+}
+
+// engineStatus runs on the engine's goroutines for every progress step.
+func (a *App) engineStatus(s engine.Status) {
+	a.mu.Lock()
+	pass := a.throttle.pass(s, time.Now())
+	a.mu.Unlock()
+	if !pass {
+		return
+	}
+	a.setTooltip(tooltip(s))
+	if ctx := a.context(); ctx != nil {
+		runtime.EventsEmit(ctx, "engine:status", statusText(s))
+	}
+}
+
+// statusText is the tooltip without the app name, for the panel's footer.
+func statusText(s engine.Status) string { return strings.TrimPrefix(tooltip(s), "Findly: ") }
+
+func (a *App) setTooltip(text string) {
+	a.mu.Lock()
+	d := a.desktop
+	a.mu.Unlock()
+	if d != nil {
+		d.SetTooltip(text)
+	}
+}
+
+func (a *App) currentEngine() *engine.Engine {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.engine
+}
+
+// paused tells the tray menu which label to show. It runs on the tray thread, so it only
+// reads the engine's status (no waiting).
+func (a *App) paused() bool {
+	e := a.currentEngine()
+	return e != nil && e.Status().State == engine.StatePaused
+}
+
+func (a *App) togglePause() {
+	e := a.currentEngine()
+	if e == nil {
+		return
+	}
+	if a.paused() {
+		e.Resume()
+	} else {
+		e.Pause()
+	}
 }
 
 func (a *App) shutdown(ctx context.Context) {
 	a.mu.Lock()
-	d := a.desktop
+	d, e := a.desktop, a.engine
+	a.engine = nil
 	a.mu.Unlock()
+	if e != nil {
+		e.Close() // interrupted indexing continues on the next start
+	}
 	if d != nil {
 		d.Close()
 	}
@@ -145,13 +245,27 @@ type Info struct {
 	// HotkeyWarning is non-empty when the search hotkey could not be registered.
 	HotkeyWarning string `json:"hotkeyWarning"`
 	DataDir       string `json:"dataDir"`
+	// IndexError is non-empty when the index could not be opened (e.g. it needs a rebuild).
+	IndexError string `json:"indexError"`
+	// ModelNote says where the search model was found, or why meaning search is off.
+	ModelNote string `json:"modelNote"`
 }
 
-// Info returns the version and the app data folder.
+// Info returns the version, the app data folder and any problem to show the user.
 func (a *App) Info() Info {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return Info{Version: Version, DataDir: a.fs.Dir(), HotkeyWarning: a.hotkeyWarning}
+	return Info{Version: Version, DataDir: a.fs.Dir(), HotkeyWarning: a.hotkeyWarning,
+		IndexError: a.engineErr, ModelNote: a.modelNote}
+}
+
+// IndexStatus describes what indexing is doing right now, as a short sentence (updates
+// arrive as the "engine:status" event). Empty when the index could not be opened.
+func (a *App) IndexStatus() string {
+	if e := a.currentEngine(); e != nil {
+		return statusText(e.Status())
+	}
+	return ""
 }
 
 // domReady runs when the page has loaded, i.e. the WebView2 browser process is running.

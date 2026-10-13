@@ -99,3 +99,10 @@ footer {
   border-left: 3px solid #e8590c;
   background: color-mix(in srgb, #e8590c 10%, transparent);
 }
+
+.status {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 60%;
+}

@@ -333,3 +333,12 @@ Real folder: `C:\Users\sansk\OneDrive\Documents` (user's OK), Vulkan, separate t
 - **No model yet** (before the T6 download): keyword search only; passages wait.
 - The vector cache is reloaded after each embedding pass, every 30 s during long ones, and after deletions. `VectorCache.Len` is back (used now).
 - Tests: a fake model (instant, blocking, or failing). 6 tests pass 10 times in a row under `-race`.
+
+## Phase 3 — T3c engine in the app (2026-10-13)
+- `App.startup` opens the engine (after the tray and hotkey) and calls `IndexAll`: every chosen folder is brought up to date in the background; unchanged files are skipped quickly. Nothing heavy runs before `wails.Run`.
+- **Model files:** llama-server is looked for next to the exe (`llama\cpu\`, where the installer will put it), the model in `%LOCALAPPDATA%\Findly\models\` (where the T6 download will put it). For development, `FINDLY_DEV_THIRD_PARTY` points at the repo's `third_party`. Without them the app runs with keyword search only, and `Info().modelNote` says why. CPU backend until T8.
+- **Index can't be opened** (other model, corrupt): the app keeps running, and the panel and tooltip explain in plain words that the index must be rebuilt; the user's files are not affected (I-7). The rebuild button comes with settings (T7).
+- **Status:** the tray tooltip shows "reading files 120 / 4,210 in Documents", "preparing meaning search 50%", "paused", "ready", and the panel footer shows the same text (event `engine:status`). Updates are throttled to 4 per second, while state changes pass at once.
+- **Tray menu:** "Pause indexing" / "Resume indexing" (plan 10.4).
+- Folders are added with `cli index` for now (the CLI and the app share `%LOCALAPPDATA%\Findly`); the folder picker comes with onboarding (T6).
+- **Live test** (scratch LOCALAPPDATA, real model): a file added while the app was closed was found at start, keyword-searchable at once, its vector added, and the model stopped by itself 60 s after its last use while the app kept running.

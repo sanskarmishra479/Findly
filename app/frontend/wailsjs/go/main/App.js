@@ -6,6 +6,10 @@ export function HidePanel() {
   return window['go']['main']['App']['HidePanel']();
 }
 
+export function IndexStatus() {
+  return window['go']['main']['App']['IndexStatus']();
+}
+
 export function Info() {
   return window['go']['main']['App']['Info']();
 }

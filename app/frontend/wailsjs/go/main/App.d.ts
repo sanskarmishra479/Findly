@@ -4,6 +4,8 @@ import {main} from '../models';
 
 export function HidePanel():Promise<void>;
 
+export function IndexStatus():Promise<string>;
+
 export function Info():Promise<main.Info>;
 
 export function ShowPanel():Promise<void>;
