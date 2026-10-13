@@ -391,7 +391,7 @@ func (ix *Indexer) save(ctx context.Context, r extracted, tier *freeTier) (strin
 		if err != nil {
 			return "", err
 		}
-		if copied {
+		if copied > 0 {
 			ix.account(tier, r.job, true)
 			return set(status, r.hash, "")
 		}

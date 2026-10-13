@@ -103,11 +103,11 @@ func TestCopyDuplicateWaitingAndFinished(t *testing.T) {
 	s.ReplaceContent(ctx, src, []Item{{Kind: ItemPassage, Text: "numbers", Pending: true}})
 	s.SetFileResult(ctx, src, StatusDone, "", "h", "")
 
-	if copied, _ := s.CopyDuplicate(ctx, "h", StatusDone, dup, true); copied {
+	if copied, _ := s.CopyDuplicate(ctx, "h", StatusDone, dup, true); copied > 0 {
 		t.Fatal("finishedOnly copied from a source still waiting for vectors")
 	}
 	// Without finishedOnly the copy takes the text at once, still waiting for vectors.
-	if copied, err := s.CopyDuplicate(ctx, "h", StatusDone, dup, false); err != nil || !copied {
+	if copied, err := s.CopyDuplicate(ctx, "h", StatusDone, dup, false); err != nil || copied == 0 {
 		t.Fatalf("copy = %v %v", copied, err)
 	}
 	if n, _ := s.CountPending(ctx); n != 2 {
@@ -116,7 +116,7 @@ func TestCopyDuplicateWaitingAndFinished(t *testing.T) {
 	// Once the source has its vectors, the copy can take them instead of embedding.
 	items, _ := s.PendingItems(ctx, src)
 	s.SetVectors(ctx, []ItemVector{{ID: items[0].ID, Vector: *vec(3)}})
-	if copied, err := s.CopyDuplicate(ctx, "h", StatusDone, dup, true); err != nil || !copied {
+	if copied, err := s.CopyDuplicate(ctx, "h", StatusDone, dup, true); err != nil || copied == 0 {
 		t.Fatalf("finished copy = %v %v", copied, err)
 	}
 	if n, _ := s.CountPending(ctx); n != 0 {

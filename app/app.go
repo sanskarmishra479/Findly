@@ -47,6 +47,7 @@ type App struct {
 	engineErr     string           // why the index could not be opened
 	modelNote     string           // where the search model was found, or why not
 	throttle      statusThrottle   // limits tooltip updates during indexing
+	quitting      bool             // shutdown has started
 }
 
 func newApp(fs *appfs.FS) *App {
@@ -98,7 +99,9 @@ func (a *App) startup(ctx context.Context) {
 	if a.onDomReady != nil {
 		a.onDomReady()
 	}
-	a.openEngine(ctx)
+	// In the background: loading a large index takes seconds, and the tray, hotkey and
+	// panel must not wait for it.
+	go a.openEngine(ctx)
 }
 
 // openEngine opens the index and starts keeping the chosen folders up to date. Indexing
@@ -113,6 +116,12 @@ func (a *App) openEngine(ctx context.Context) {
 		a.mu.Unlock()
 		a.setTooltip("Findly: the index needs attention. Open search for details")
 		runtime.EventsEmit(ctx, "engine:error", a.engineErr)
+		return
+	}
+	if a.quitting {
+		// The app quit while the index was opening: nobody else will close it.
+		a.mu.Unlock()
+		eng.Close()
 		return
 	}
 	a.engine = eng
@@ -188,6 +197,7 @@ func (a *App) shutdown(ctx context.Context) {
 	a.mu.Lock()
 	d, e := a.desktop, a.engine
 	a.engine = nil
+	a.quitting = true // an engine still opening closes itself
 	a.mu.Unlock()
 	if e != nil {
 		e.Close() // interrupted indexing continues on the next start

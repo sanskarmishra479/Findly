@@ -13,9 +13,9 @@ import (
 )
 
 // Model files. The app looks in its data folder (where the T6 download puts the model)
-// and next to the exe (where the installer puts llama-server). For development,
-// FINDLY_DEV_THIRD_PARTY can point at the repository's third_party folder
-// (scripts\fetch-*.ps1).
+// and next to the exe (where the installer puts llama-server). In development builds
+// (-tags devpaths) FINDLY_DEV_THIRD_PARTY can point at the repository's third_party
+// folder (scripts\fetch-*.ps1).
 const (
 	modelFile  = "embeddinggemma-2-Q8_0.gguf"
 	llamaExe   = "llama-server.exe"
@@ -31,7 +31,10 @@ func modelStarter(fs *appfs.FS) (engine.StartModel, string) {
 		exeDir = filepath.Dir(exe)
 	}
 	models, _ := fs.Path(appfs.DirModels)
-	dev := os.Getenv(devEnvVar)
+	dev := ""
+	if devPaths {
+		dev = os.Getenv(devEnvVar)
+	}
 
 	server := firstExisting(
 		filepath.Join(exeDir, "llama", cpuBackend, llamaExe),

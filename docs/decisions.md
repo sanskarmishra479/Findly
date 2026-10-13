@@ -342,3 +342,13 @@ Real folder: `C:\Users\sansk\OneDrive\Documents` (user's OK), Vulkan, separate t
 - **Tray menu:** "Pause indexing" / "Resume indexing" (plan 10.4).
 - Folders are added with `cli index` for now (the CLI and the app share `%LOCALAPPDATA%\Findly`); the folder picker comes with onboarding (T6).
 - **Live test** (scratch LOCALAPPDATA, real model): a file added while the app was closed was found at start, keyword-searchable at once, its vector added, and the model stopped by itself 60 s after its last use while the app kept running.
+- **T3 review fixes:**
+  - **Copied duplicates:** the vector cache is reloaded after any run that stored files, even with nothing left to embed, so a copy of an identical, already-embedded file is found by meaning at once.
+  - **Progress:** `CopyDuplicate` returns the number of passages copied, and copies count toward embedding progress, so the percentage reaches 100%.
+  - **Model pool:** it owns a context that `close` cancels, so quitting never waits for a model start and nothing starts a model after `Close` (a `closed` flag). The model's first lease is taken in the same critical section that stores it.
+  - **Stuck file:** if the embedding pass stops on the same file 3 times (`EmbedStats.Stuck`), that file is given up (keyword search only, reason recorded) instead of blocking meaning search for every later file. Retries after errors back off from 5 min up to 1 h, and reset after a success.
+  - The model starts during indexing only when a file was actually stored (not for failed or over-limit files).
+  - "Adding vectors" is tracked in its own field, so new folder work always interrupts it. The idle check reports "model unloaded" without rewriting the stored status.
+  - Copying a failed twin also copies its explanation into `files.error`.
+  - The app opens the engine in the background (large indexes take seconds to load). An engine that finishes opening after quit closes itself.
+  - `FINDLY_DEV_THIRD_PARTY` only works in development builds (`wails build -tags devpaths`), so an environment variable can never choose which llama-server.exe a release build runs.

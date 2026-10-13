@@ -24,6 +24,10 @@ type EmbedStats struct {
 	Copied   int           // files that took the vectors of an identical file instead
 	Failed   int           // files the model failed on (they stay keyword-searchable)
 	Embed    time.Duration // time spent waiting for the model
+	// Stuck is the file being embedded when the pass stopped with an error (0 if none),
+	// so the caller can give up on a file that keeps failing instead of retrying it
+	// before every other file forever.
+	Stuck int64
 }
 
 // maxCrashFiles: if this many files in a row crash the embedding server, the server
@@ -70,9 +74,9 @@ func (ix *Indexer) EmbedPending(ctx context.Context, onProgress func(EmbedProgre
 			if err != nil {
 				return st, err
 			}
-			if copied {
+			if copied > 0 {
 				st.Copied++
-				report(0)
+				report(copied) // counted like embedded passages, so progress reaches 100%
 				continue
 			}
 		}
@@ -123,6 +127,7 @@ func (ix *Indexer) EmbedPending(ctx context.Context, onProgress func(EmbedProgre
 		default:
 			// Server down, broken output, timeout: stop, and leave the passages waiting so
 			// nothing is wrongly given up on. %w twice keeps ErrCrashed etc. visible.
+			st.Stuck = f.ID
 			return st, fmt.Errorf("%w: %w", ErrEmbedder, err)
 		}
 		crashes = 0

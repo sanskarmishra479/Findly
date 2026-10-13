@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -19,12 +20,18 @@ import (
 // fakeModel embeds instantly (or waits on gate, if set).
 type fakeModel struct {
 	gate   chan struct{}
+	failOn string // passages containing this get a server error (not the input's fault)
 	closed atomic.Bool
 	calls  atomic.Int64
 }
 
 func (m *fakeModel) EmbedPassages(ctx context.Context, _ string, texts []string) ([]embed.Vector, error) {
 	m.calls.Add(1)
+	for _, t := range texts {
+		if m.failOn != "" && strings.Contains(t, m.failOn) {
+			return nil, errors.New("embed: request: connection reset")
+		}
+	}
 	if m.gate != nil {
 		select {
 		case <-m.gate:
@@ -53,17 +60,22 @@ type starter struct {
 	low    []bool
 	err    error
 	gate   chan struct{}
+	failOn string
 	delay  time.Duration
 }
 
-func (s *starter) start(_ context.Context, low bool) (Model, error) {
-	time.Sleep(s.delay)
+func (s *starter) start(ctx context.Context, low bool) (Model, error) {
+	select {
+	case <-time.After(s.delay):
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.err != nil {
 		return nil, s.err
 	}
-	m := &fakeModel{gate: s.gate}
+	m := &fakeModel{gate: s.gate, failOn: s.failOn}
 	s.models = append(s.models, m)
 	s.low = append(s.low, low)
 	return m, nil
@@ -75,7 +87,7 @@ func (s *starter) count() int {
 	return len(s.models)
 }
 
-func newEngine(t *testing.T, s *starter, idle time.Duration) *Engine {
+func newEngine(t *testing.T, s *starter, idle time.Duration, opts ...func(*Config)) *Engine {
 	t.Helper()
 	fs, err := appfs.Open(t.TempDir())
 	if err != nil {
@@ -86,6 +98,9 @@ func newEngine(t *testing.T, s *starter, idle time.Duration) *Engine {
 		retryAfter: time.Hour, Licensed: func() bool { return true }}
 	if s != nil {
 		cfg.StartModel = s.start
+	}
+	for _, o := range opts {
+		o(&cfg)
 	}
 	e, err := Open(cfg)
 	if err != nil {
@@ -243,4 +258,62 @@ func TestNewFolderInterruptsEmbedding(t *testing.T) {
 	})
 	close(gate)
 	waitUntil(t, "all vectors", func() bool { return pending(t, e) == 0 && e.Status().State == StateIdle })
+}
+
+// T3 review #1: a copy of an already-embedded file arrives with its vectors (nothing to
+// embed); the vector cache must still be reloaded so it is searchable by meaning.
+func TestCopiedDuplicateIsSearchableByMeaning(t *testing.T) {
+	s := &starter{}
+	e := newEngine(t, s, time.Minute)
+	a := folder(t, map[string]string{"report.txt": "the same quarterly report"})
+	e.AddFolder(context.Background(), a)
+	waitUntil(t, "first folder embedded", func() bool { return pending(t, e) == 0 && e.Cache().Len() == 1 && e.Status().State == StateIdle })
+	b := folder(t, map[string]string{"report copy.txt": "the same quarterly report"})
+	e.AddFolder(context.Background(), b)
+	waitUntil(t, "copy in the vector cache", func() bool { return e.Cache().Len() == 2 })
+}
+
+// T3 review: a file the model keeps failing on is given up after maxStuck passes, so it
+// cannot block meaning search for the files stored after it.
+func TestStuckFileIsGivenUp(t *testing.T) {
+	s := &starter{failOn: "unlucky"}
+	e := newEngine(t, s, time.Minute, func(c *Config) { c.retryAfter = 10 * time.Millisecond })
+	dir := folder(t, map[string]string{"a.txt": "an unlucky passage", "b.txt": "a normal passage"})
+	e.AddFolder(context.Background(), dir)
+	waitUntil(t, "other file embedded, bad file given up", func() bool {
+		f, ok, _ := e.Store().FileByPath(context.Background(), filepath.Join(dir, "a.txt"))
+		return ok && f.Error != "" && pending(t, e) == 0 && e.Cache().Len() == 1
+	})
+	f, ok, err := e.Store().FileByPath(context.Background(), filepath.Join(dir, "a.txt"))
+	if err != nil || !ok || f.Error == "" {
+		t.Fatalf("the given-up file has no reason recorded: %+v %v %v (starts %d)", f, ok, err, s.count())
+	}
+	if e.Cache().Len() != 1 {
+		t.Fatalf("cache = %d vectors, want 1 (the normal file)", e.Cache().Len())
+	}
+}
+
+// T3 review: after Close nothing may start a model, and Close does not wait for a slow
+// model start.
+func TestCloseDuringStartAndAfter(t *testing.T) {
+	s := &starter{delay: 10 * time.Second}
+	fs, _ := appfs.Open(t.TempDir())
+	defer fs.Close()
+	e, err := Open(Config{FS: fs, StartModel: s.start, idleTick: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.WarmUp() // a 10 s start begins
+	time.Sleep(20 * time.Millisecond)
+	start := time.Now()
+	e.Close()
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("Close waited %v for the model start", d)
+	}
+	s.delay = 0
+	e.WarmUp() // after Close: must not start anything
+	time.Sleep(50 * time.Millisecond)
+	if s.count() != 0 {
+		t.Fatalf("%d models started after Close", s.count())
+	}
 }

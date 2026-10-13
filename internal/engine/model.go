@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -16,8 +17,12 @@ type Model interface {
 }
 
 // StartModel starts the model. lowPriority asks for below-normal CPU priority (used
-// when the model is started for indexing, so the PC stays responsive).
+// when the model is started for indexing, so the PC stays responsive). It must stop
+// starting when ctx ends.
 type StartModel func(ctx context.Context, lowPriority bool) (Model, error)
+
+// errPoolClosed is returned once the engine is closing.
+var errPoolClosed = errors.New("engine: closed")
 
 // modelPool keeps at most one model running and stops it when nobody has needed it for
 // a while (plan section 5): indexing keeps it IndexIdle after its last use, searching
@@ -25,13 +30,24 @@ type StartModel func(ctx context.Context, lowPriority bool) (Model, error)
 type modelPool struct {
 	start StartModel
 	now   func() time.Time
+	// ctx belongs to the pool, not to a caller: a start is shared by everyone waiting
+	// for it, so one caller giving up must not cancel it. close cancels it, so quitting
+	// never waits for a slow model start.
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	mu        sync.Mutex
+	closed    bool
 	model     Model
 	starting  chan struct{} // non-nil while a start is in progress; closed when it ends
 	startErr  error         // result of the last start
 	users     int           // leases not yet released
 	keepUntil time.Time     // stop no earlier than this
+}
+
+func newModelPool(start StartModel) *modelPool {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &modelPool{start: start, now: time.Now, ctx: ctx, cancel: cancel}
 }
 
 // get returns the running model, starting it if needed. Callers that arrive while a
@@ -40,6 +56,10 @@ type modelPool struct {
 func (p *modelPool) get(ctx context.Context, keep time.Duration, lowPriority bool) (Model, func(), error) {
 	for {
 		p.mu.Lock()
+		if p.closed {
+			p.mu.Unlock()
+			return nil, nil, errPoolClosed
+		}
 		if p.model != nil {
 			m := p.lease(keep)
 			p.mu.Unlock()
@@ -50,19 +70,27 @@ func (p *modelPool) get(ctx context.Context, keep time.Duration, lowPriority boo
 			done := make(chan struct{})
 			p.starting = done
 			p.mu.Unlock()
-			// The start outlives this caller's ctx on purpose: another caller may be
-			// waiting for it. It still ends when the model is up or fails.
-			m, err := p.start(context.WithoutCancel(ctx), lowPriority)
+			m, err := p.start(p.ctx, lowPriority)
 			p.mu.Lock()
-			p.model, p.startErr, p.starting = m, err, nil
+			p.starting = nil
+			p.startErr = err
 			close(done)
-			if err != nil {
-				p.model = nil
+			switch {
+			case err != nil:
 				p.mu.Unlock()
 				return nil, nil, err
+			case p.closed:
+				// The engine closed during the start: nobody will stop this model later.
+				p.mu.Unlock()
+				m.Close()
+				return nil, nil, errPoolClosed
 			}
+			// Leased in the same critical section, so an idle check cannot stop the new
+			// model before its first user has it.
+			p.model = m
+			lm := p.lease(keep)
 			p.mu.Unlock()
-			continue
+			return lm, p.releaser(keep), nil
 		}
 		wait := p.starting
 		p.mu.Unlock()
@@ -72,8 +100,7 @@ func (p *modelPool) get(ctx context.Context, keep time.Duration, lowPriority boo
 			return nil, nil, ctx.Err()
 		}
 		p.mu.Lock()
-		err := p.startErr
-		up := p.model != nil
+		err, up := p.startErr, p.model != nil
 		p.mu.Unlock()
 		if !up && err != nil {
 			return nil, nil, err
@@ -108,9 +135,9 @@ func (p *modelPool) releaser(keep time.Duration) func() {
 
 // startAsync starts the model in the background if it isn't running, so it is ready by
 // the time it is needed (e.g. while files are still being read).
-func (p *modelPool) startAsync(ctx context.Context, keep time.Duration, lowPriority bool) {
+func (p *modelPool) startAsync(keep time.Duration, lowPriority bool) {
 	go func() {
-		if _, release, err := p.get(ctx, keep, lowPriority); err == nil {
+		if _, release, err := p.get(p.ctx, keep, lowPriority); err == nil {
 			release()
 		}
 	}()
@@ -149,13 +176,15 @@ func (p *modelPool) drop() {
 	}
 }
 
-// close stops the model and waits for a start in progress to finish first.
+// close stops the model, cancels a start in progress and refuses new ones.
 func (p *modelPool) close() {
 	p.mu.Lock()
+	p.closed = true
 	wait := p.starting
 	p.mu.Unlock()
+	p.cancel()
 	if wait != nil {
-		<-wait
+		<-wait // the start sees the cancelled context and returns quickly
 	}
 	p.drop()
 }

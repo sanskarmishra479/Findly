@@ -636,16 +636,16 @@ func (s *Store) HasContent(ctx context.Context, fileID int64) (bool, error) {
 // CopyDuplicate looks for another file with the same content hash and the same status
 // (done, or partial: the same pages read so far) and, if one exists, copies its items,
 // vectors and keyword rows to file `to`, all in one transaction, so the source cannot
-// disappear halfway. Identical files are embedded only once (plan 9.10). copied is false
-// if there is no usable source.
+// disappear halfway. Identical files are embedded only once (plan 9.10). copied is the
+// number of passages copied, 0 if there is no usable source.
 //
 // Items still waiting for their vector are copied as waiting. With finishedOnly, only a
 // source whose passages all have their vectors counts (used by the embedding pass, so a
 // copy never takes over a twin's waiting or failed state instead of its vectors).
-func (s *Store) CopyDuplicate(ctx context.Context, hash, status string, to int64, finishedOnly bool) (copied bool, err error) {
+func (s *Store) CopyDuplicate(ctx context.Context, hash, status string, to int64, finishedOnly bool) (copied int, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	defer tx.Rollback()
 
@@ -657,21 +657,21 @@ func (s *Store) CopyDuplicate(ctx context.Context, hash, status string, to int64
 		  AND (? = 0 OR NOT EXISTS(SELECT 1 FROM items p WHERE p.file_id = f.id AND p.embed <> ?))
 		LIMIT 1`, hash, status, to, ItemName, finishedOnly, embedNone).Scan(&from)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return 0, nil
 	}
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM items WHERE file_id = ? AND kind <> ?`, to, ItemName); err != nil {
-		return false, err
+		return 0, err
 	}
 	rows, err := tx.QueryContext(ctx, `
 		SELECT i.kind, i.locator, i.text, i.embed, v.bin, v.i8, v.scale
 		FROM items i LEFT JOIN vectors v ON v.item_id = i.id
 		WHERE i.file_id = ? AND i.kind <> ? ORDER BY i.id`, from, ItemName)
 	if err != nil {
-		return false, err
+		return 0, err
 	}
 	type src struct {
 		kind          string
@@ -685,37 +685,48 @@ func (s *Store) CopyDuplicate(ctx context.Context, hash, status string, to int64
 		var it src
 		if err := rows.Scan(&it.kind, &it.locator, &it.text, &it.embed, &it.bin, &it.i8, &it.scale); err != nil {
 			rows.Close()
-			return false, err
+			return 0, err
 		}
 		items = append(items, it)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return false, err
+		return 0, err
 	}
 	for _, it := range items {
 		res, err := tx.ExecContext(ctx, `INSERT INTO items(file_id, kind, locator, text, embed) VALUES(?, ?, ?, ?, ?)`,
 			to, it.kind, it.locator, it.text, it.embed)
 		if err != nil {
-			return false, err
+			return 0, err
 		}
 		newID, err := res.LastInsertId()
 		if err != nil {
-			return false, err
+			return 0, err
 		}
 		if it.text.Valid && it.text.String != "" {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO items_fts(rowid, name, text) VALUES(?, '', ?)`, newID, it.text.String); err != nil {
-				return false, err
+				return 0, err
 			}
 		}
 		if it.bin != nil {
 			if _, err := tx.ExecContext(ctx, `INSERT INTO vectors(item_id, bin, i8, scale) VALUES(?, ?, ?, ?)`,
 				newID, it.bin, it.i8, it.scale.Float64); err != nil {
-				return false, err
+				return 0, err
 			}
 		}
 	}
-	return len(items) > 0, tx.Commit()
+	failed := false
+	for _, it := range items {
+		failed = failed || it.embed == embedFailed
+	}
+	if failed {
+		// A twin the model failed on: the copy is in the same state, so it gets the same
+		// explanation (otherwise it would silently lack meaning search).
+		if _, err := tx.ExecContext(ctx, `UPDATE files SET error = (SELECT error FROM files WHERE id = ?) WHERE id = ?`, from, to); err != nil {
+			return 0, err
+		}
+	}
+	return len(items), tx.Commit()
 }
 
 // ---- used by search ----
