@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode/utf16"
 	"unsafe"
 
@@ -75,7 +76,7 @@ type Desktop struct {
 	taskbarCreated uint32  // message sent when Explorer restarts: add the icon again
 	winEventHook   uintptr // foreground-change hook, 0 if none
 	icon           windows.Handle
-	iconAdded      bool // the tray icon exists (desktop thread only)
+	closing        atomic.Bool // set by Close; nothing else may end the desktop
 }
 
 const (
@@ -84,6 +85,7 @@ const (
 	msgTray       = wmApp + 1 // tray icon mouse events
 	msgSetTooltip = wmApp + 2
 	msgClose      = wmApp + 3 // private: a WM_CLOSE from another program must not remove the tray
+	trayTimerID   = 1         // retries adding the tray icon
 
 	cmdOpen = 1
 	cmdQuit = 2
@@ -140,6 +142,9 @@ func (d *Desktop) SetTooltip(s string) {
 // Close removes the tray icon, releases the hotkey and stops the desktop thread. Calling
 // it again, or SetTooltip after it, does nothing.
 func (d *Desktop) Close() {
+	// Only this flag ends the desktop. Messages alone can't: any program can post
+	// WM_QUIT, WM_DESTROY or our private close message to a top-level window.
+	d.closing.Store(true)
 	if !d.closed() {
 		procPostMessageW.Call(uintptr(d.hwnd), msgClose, 0, 0)
 	}
@@ -176,8 +181,14 @@ func (d *Desktop) loop(ready chan<- error) {
 	var m msg
 	for {
 		r, _, _ := procGetMessageW.Call(uintptr(unsafe.Pointer(&m)), 0, 0, 0)
-		if int32(r) <= 0 { // 0: WM_QUIT, -1: error
+		if int32(r) == -1 {
 			return
+		}
+		if r == 0 { // WM_QUIT
+			if d.closing.Load() {
+				return
+			}
+			continue // posted by another program: the tray and hotkey must stay
 		}
 		procTranslateMessage.Call(uintptr(unsafe.Pointer(&m)))
 		procDispatchMessageW.Call(uintptr(unsafe.Pointer(&m)))
@@ -226,8 +237,12 @@ func (d *Desktop) addIcon() {
 		return
 	}
 	if d.notify(nimAdd) == nil {
-		d.iconAdded = true
+		procKillTimer.Call(uintptr(d.hwnd), trayTimerID)
+		return
 	}
+	// Retry every 10 s: without the icon (and with the hotkey taken by another program)
+	// the user could not reach Findly at all. Explorer's TaskbarCreated also retries.
+	procSetTimer.Call(uintptr(d.hwnd), trayTimerID, 10_000, 0)
 }
 
 // closed reports whether the desktop thread has ended.
@@ -306,16 +321,24 @@ func wndProc(hwnd, message, wParam, lParam uintptr) uintptr {
 			d.showMenu()
 		}
 		return 0
+	case wmTimer:
+		if wParam == trayTimerID {
+			d.addIcon()
+		}
+		return 0
 	case msgSetTooltip:
 		d.notify(nimModify)
 		return 0
 	case msgClose:
+		if !d.closing.Load() {
+			return 0 // posted by another program, not by Close
+		}
 		if d.winEventHook != 0 {
 			procUnhookWinEvent.Call(d.winEventHook)
 			d.winEventHook = 0
 		}
 		procUnregisterHotKey.Call(hwnd, hotkeyID)
-		if d.iconAdded {
+		if !d.opts.NoTrayIcon { // also when the add reported a timeout but did add the icon
 			d.notify(nimDelete)
 		}
 		procDestroyWindow.Call(hwnd)
@@ -323,7 +346,9 @@ func wndProc(hwnd, message, wParam, lParam uintptr) uintptr {
 	case wmClose:
 		return 0 // only Close() ends the desktop window (it is never shown, so no user closes it)
 	case wmDestroy:
-		procPostQuitMessage.Call(0)
+		if d.closing.Load() { // a posted WM_DESTROY from outside destroys nothing
+			procPostQuitMessage.Call(0)
+		}
 		return 0
 	}
 	if d.taskbarCreated != 0 && uint32(message) == d.taskbarCreated {

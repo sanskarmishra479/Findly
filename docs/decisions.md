@@ -296,3 +296,9 @@ Real folder: `C:\Users\sansk\OneDrive\Documents` (user's OK), Vulkan, separate t
 - **Accepted:**
   - `WindowShow` is asynchronous (posted to the UI thread), while `WindowHide` is direct. A show and a hide very close together can end with the window and the state disagreeing; the next hotkey fixes it.
   - `Window.Ours` compares process IDs, so WebView2 pop-ups (another process) would count as "another program". Check this in T4 if the panel ever opens pop-ups.
+- **Verification follow-up:**
+  - Only `Close()` can end the desktop. It sets a `closing` flag first; the private close message, WM_DESTROY and WM_QUIT are ignored without the flag. Any program can post them to a top-level window, and before this fix each one left Findly running but unreachable (tested against the real exe).
+  - `Close` always removes the tray icon (unless `NoTrayIcon`), even when the add had reported a timeout, so no ghost icon is left.
+  - A failed tray-icon add is retried every 10 s (`SetTimer`), not only on Explorer's TaskbarCreated. Otherwise, with the hotkey also taken, Findly would be unreachable without any message.
+  - TEMP is also restored at the end of `startup`: the WebView2 browser process exists by then, so the restore no longer depends on the page finishing loading.
+  - Esc also ignores `keyCode 229` (IMEs that do not set `isComposing`).

@@ -43,6 +43,7 @@ const (
 	wmClose     = 0x0010
 	wmCommand   = 0x0111
 	wmHotkey    = 0x0312
+	wmTimer     = 0x0113
 	wmLButtonUp = 0x0202
 	wmRButtonUp = 0x0205
 	wmApp       = 0x8000
@@ -132,6 +133,8 @@ var (
 	procAllowSetForeground  = user32.NewProc("AllowSetForegroundWindow")
 	procFindWindowW         = user32.NewProc("FindWindowW")
 	procGetClassNameW       = user32.NewProc("GetClassNameW")
+	procSetTimer            = user32.NewProc("SetTimer")
+	procKillTimer           = user32.NewProc("KillTimer")
 	procGetTickCount        = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetTickCount")
 )
 

@@ -48,10 +48,13 @@ func TestStartCallbacksClose(t *testing.T) {
 	// Longer than the 127 characters Windows allows (cut in tooltipUTF16, tested below).
 	d.SetTooltip(strings.Repeat("a", 500))
 
-	// A WM_CLOSE from another program must not remove the tray and hotkey.
-	procPostMessageW.Call(uintptr(d.hwnd), wmClose, 0, 0)
+	// Messages from another program must not end the tray and hotkey: WM_CLOSE, our private
+	// close message, WM_DESTROY and WM_QUIT. Only Close() may.
+	for _, m := range []uintptr{wmClose, msgClose, wmDestroy, 0x0012 /* WM_QUIT */} {
+		procPostMessageW.Call(uintptr(d.hwnd), m, 0, 0)
+	}
 	procPostMessageW.Call(uintptr(d.hwnd), wmHotkey, hotkeyID, 0)
-	waitFor(t, hot, "hotkey after an outside WM_CLOSE")
+	waitFor(t, hot, "hotkey after outside close messages")
 
 	d.Close()
 	select {

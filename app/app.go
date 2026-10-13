@@ -32,7 +32,7 @@ type App struct {
 	fs    *appfs.FS
 	panel panelState
 
-	onDomReady func() // set before wails.Run; runs once the page has loaded
+	onDomReady func() // set before wails.Run; runs once the page has loaded (or startup ends)
 
 	// mu guards desktop and hotkeyWarning: startup runs on its own goroutine while the
 	// page may already call Info.
@@ -72,7 +72,8 @@ func (a *App) startup(ctx context.Context) {
 		runtime.EventsEmit(ctx, "hotkey:warning", warning) // the page may have asked Info already
 		d.SetTooltip("Findly: hotkey in use, click to search")
 	case err != nil:
-		// No tray and no hotkey: the app could not be reached at all, so say so and stop.
+		// The desktop window could not be created: no tray and no hotkey, so the app could
+		// not be reached at all. Say so and stop.
 		desktop.MessageBox("Findly could not start", err.Error())
 		runtime.Quit(ctx)
 		return
@@ -80,6 +81,11 @@ func (a *App) startup(ctx context.Context) {
 	a.mu.Lock()
 	a.desktop = d
 	a.mu.Unlock()
+	// The WebView2 browser process exists by now (it starts before startup runs), so TEMP
+	// can go back to the user's value even if the page never finishes loading.
+	if a.onDomReady != nil {
+		a.onDomReady()
+	}
 }
 
 func (a *App) shutdown(ctx context.Context) {

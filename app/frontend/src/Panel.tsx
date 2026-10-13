@@ -27,7 +27,8 @@ export function Panel() {
     const onKey = (e: KeyboardEvent) => {
       // During IME composition (Japanese, Chinese, Hindi input...) Esc cancels the
       // composition, not the panel.
-      if (e.key === "Escape" && !e.isComposing) {
+      // (Some IMEs report the key as keyCode 229 instead of setting isComposing.)
+      if (e.key === "Escape" && !e.isComposing && e.keyCode !== 229) {
         e.preventDefault();
         HidePanel();
       }
