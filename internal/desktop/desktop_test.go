@@ -5,8 +5,12 @@ package desktop
 import (
 	"errors"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 // A combination nobody uses, so the tests never collide with the user's hotkeys.
@@ -24,11 +28,12 @@ func waitFor(t *testing.T, ch <-chan struct{}, what string) {
 func TestStartCallbacksClose(t *testing.T) {
 	hot, open, quit := make(chan struct{}, 1), make(chan struct{}, 1), make(chan struct{}, 1)
 	d, err := Start(Options{
-		Tooltip:  "Findly test",
-		Hotkey:   testHotkey,
-		OnHotkey: func() { hot <- struct{}{} },
-		OnOpen:   func() { open <- struct{}{} },
-		OnQuit:   func() { quit <- struct{}{} },
+		Tooltip:    "Findly test",
+		NoTrayIcon: true,
+		Hotkey:     testHotkey,
+		OnHotkey:   func() { hot <- struct{}{} },
+		OnOpen:     func() { open <- struct{}{} },
+		OnQuit:     func() { quit <- struct{}{} },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -40,8 +45,13 @@ func TestStartCallbacksClose(t *testing.T) {
 	waitFor(t, open, "tray click")
 
 	d.SetTooltip("Indexing 4,210 of 12,000")
-	// Longer than the 127 characters Windows allows: must be cut, not overflow.
-	d.SetTooltip(string(make([]rune, 500)))
+	// Longer than the 127 characters Windows allows (cut in tooltipUTF16, tested below).
+	d.SetTooltip(strings.Repeat("a", 500))
+
+	// A WM_CLOSE from another program must not remove the tray and hotkey.
+	procPostMessageW.Call(uintptr(d.hwnd), wmClose, 0, 0)
+	procPostMessageW.Call(uintptr(d.hwnd), wmHotkey, hotkeyID, 0)
+	waitFor(t, hot, "hotkey after an outside WM_CLOSE")
 
 	d.Close()
 	select {
@@ -50,7 +60,7 @@ func TestStartCallbacksClose(t *testing.T) {
 		t.Fatal("Close returned before the desktop thread ended")
 	}
 	// A second Start works after Close (the window class is reused).
-	d2, err := Start(Options{Hotkey: testHotkey})
+	d2, err := Start(Options{Hotkey: testHotkey, NoTrayIcon: true})
 	if err != nil {
 		t.Fatalf("restart: %v", err)
 	}
@@ -75,7 +85,7 @@ func TestHotkeyInUse(t *testing.T) {
 	<-held
 	defer close(release)
 
-	d, err := Start(Options{Hotkey: testHotkey})
+	d, err := Start(Options{Hotkey: testHotkey, NoTrayIcon: true})
 	if !errors.Is(err, ErrHotkeyInUse) {
 		t.Fatalf("got %v, want ErrHotkeyInUse", err)
 	}
@@ -86,12 +96,55 @@ func TestHotkeyInUse(t *testing.T) {
 }
 
 func TestOnlyOneDesktop(t *testing.T) {
-	d, err := Start(Options{Hotkey: testHotkey})
+	d, err := Start(Options{Hotkey: testHotkey, NoTrayIcon: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	if _, err := Start(Options{Hotkey: testHotkey}); err == nil {
+	if _, err := Start(Options{Hotkey: testHotkey, NoTrayIcon: true}); err == nil {
 		t.Fatal("a second Desktop was started")
 	}
+}
+
+func TestTooltipUTF16(t *testing.T) {
+	if got := tooltipUTF16(strings.Repeat("a", 500), 127); len(got) != 127 {
+		t.Errorf("long text: %d units, want 127", len(got))
+	}
+	// An emoji takes two UTF-16 units; cutting between them would leave half of it.
+	got := tooltipUTF16(strings.Repeat("a", 126)+"\U0001F600", 127)
+	if len(got) != 126 {
+		t.Errorf("emoji at the cut: %d units, want 126 (emoji dropped whole)", len(got))
+	}
+	if got := tooltipUTF16("a\x00b", 127); string(rune(got[0]))+string(rune(got[1])) != "ab" || len(got) != 2 {
+		t.Errorf("NUL not dropped: %v", got)
+	}
+}
+
+func TestCloseTwiceAndAfterClose(t *testing.T) {
+	d, err := Start(Options{Hotkey: testHotkey, NoTrayIcon: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+	d.Close()                // must not block or post to a destroyed window
+	d.SetTooltip("too late") // likewise
+}
+
+func TestIsShell(t *testing.T) {
+	c, _ := windowsUTF16Ptr("Shell_TrayWnd")
+	h, _, _ := procFindWindowW.Call(uintptr(c), 0)
+	if h == 0 {
+		t.Skip("no taskbar (Explorer not running)")
+	}
+	if !Window(h).IsShell() {
+		t.Error("the taskbar is not recognized")
+	}
+	if Window(0).IsShell() {
+		t.Error("no window counted as the taskbar")
+	}
+}
+
+func windowsUTF16Ptr(s string) (unsafe.Pointer, error) {
+	p, err := windows.UTF16PtrFromString(s)
+	return unsafe.Pointer(p), err
 }

@@ -6,7 +6,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// Win32 functions not in x/sys/windows. All are called on the desktop thread only.
+// Win32 functions not in x/sys/windows. Window, menu, tray, hotkey and hook calls run on
+// the desktop thread; PostMessage and the foreground helpers (foreground.go) are safe
+// from any goroutine.
 var (
 	user32  = windows.NewLazySystemDLL("user32.dll")
 	shell32 = windows.NewLazySystemDLL("shell32.dll")
@@ -66,7 +68,7 @@ const (
 	tpmBottomAlign = 0x0020
 
 	imageIcon       = 1
-	lrDefaultColor  = 0
+	lrShared        = 0x8000 // Windows owns the handle: no DestroyIcon needed
 	smCxSmIcon      = 49
 	smCySmIcon      = 50
 	idiApplication  = 32512
@@ -129,6 +131,7 @@ var (
 	procIsWindow            = user32.NewProc("IsWindow")
 	procAllowSetForeground  = user32.NewProc("AllowSetForegroundWindow")
 	procFindWindowW         = user32.NewProc("FindWindowW")
+	procGetClassNameW       = user32.NewProc("GetClassNameW")
 	procGetTickCount        = windows.NewLazySystemDLL("kernel32.dll").NewProc("GetTickCount")
 )
 

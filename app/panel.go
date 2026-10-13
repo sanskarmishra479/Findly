@@ -45,7 +45,9 @@ func (p *panelState) hide() desktop.Window {
 func (p *panelState) foreground(ours bool, at uint32) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if !p.visible || ours || int32(at-p.shownAt) < 0 { // tick counts wrap; compare as a difference
+	// Same tick counts as stale too: the tick advances in ~16 ms steps, and the click on the
+	// tray icon that opened the panel can be stamped with the same value.
+	if !p.visible || ours || int32(at-p.shownAt) <= 0 { // tick counts wrap; compare as a difference
 		return false
 	}
 	p.visible, p.prev = false, 0

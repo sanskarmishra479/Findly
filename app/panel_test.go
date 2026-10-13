@@ -48,3 +48,15 @@ func TestPanelTickWrap(t *testing.T) {
 		t.Fatal("event after the wrap did not close the panel")
 	}
 }
+
+func TestPanelSameTickIsStale(t *testing.T) {
+	// The tray click that opened the panel can be stamped with the same tick.
+	var p panelState
+	p.show(1, 5000)
+	if p.foreground(false, 5000) {
+		t.Fatal("an event in the same tick as showing closed the panel")
+	}
+	if !p.foreground(false, 5016) {
+		t.Fatal("a later event did not close the panel")
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"embed"
 	"fmt"
 	"os"
+	"sync"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/logger"
@@ -55,16 +56,18 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	// WebView2 creates temporary files in %TEMP%. Point TEMP at the app folder so every
-	// write stays inside it (plan I-3); helper programs get their own environment anyway.
+	// WebView2's browser process creates temporary files in %TEMP%. It copies the
+	// environment when it starts, so TEMP points into the app folder (plan I-3) only until
+	// the page is up. Restoring it then matters: programs Findly opens later (Word, Edge,
+	// Explorer via ShellExecute) inherit the environment and must use the user's TEMP.
 	tmp, err := afs.Path(appfs.DirTmp)
 	if err != nil {
 		return err
 	}
-	os.Setenv("TEMP", tmp)
-	os.Setenv("TMP", tmp)
+	restoreTemp := setTemp(tmp)
 
 	app := newApp(afs)
+	app.onDomReady = restoreTemp
 	err = wails.Run(&options.App{
 		Title:  "Findly",
 		Width:  panelWidth,
@@ -79,6 +82,7 @@ func run() error {
 		BackgroundColour:  &options.RGBA{R: 0, G: 0, B: 0, A: 0},
 		AssetServer:       &assetserver.Options{Assets: assets},
 		OnStartup:         app.startup,
+		OnDomReady:        app.domReady,
 		OnShutdown:        app.shutdown,
 		Bind:              []any{app},
 		SingleInstanceLock: &options.SingleInstanceLock{
@@ -101,4 +105,28 @@ func run() error {
 		return fmt.Errorf("window: %w", err)
 	}
 	return nil
+}
+
+// setTemp points TEMP and TMP at dir and returns a function that restores the previous
+// values (safe to call more than once).
+func setTemp(dir string) (restore func()) {
+	oldTemp, hadTemp := os.LookupEnv("TEMP")
+	oldTmp, hadTmp := os.LookupEnv("TMP")
+	os.Setenv("TEMP", dir)
+	os.Setenv("TMP", dir)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			reset("TEMP", oldTemp, hadTemp)
+			reset("TMP", oldTmp, hadTmp)
+		})
+	}
+}
+
+func reset(key, val string, had bool) {
+	if had {
+		os.Setenv(key, val)
+	} else {
+		os.Unsetenv(key)
+	}
 }

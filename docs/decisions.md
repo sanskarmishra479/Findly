@@ -282,3 +282,17 @@ Real folder: `C:\Users\sansk\OneDrive\Documents` (user's OK), Vulkan, separate t
 - The CSP `<meta>` now comes after `<meta charset>`.
 - **Decided — WebView2 network connection (O-1):** accepted and documented (user decision, 2026-10-13); see plan.md O-1. The WebView2 runtime's browser process opens one HTTPS connection to Microsoft (2603:1046:…::443, no reverse DNS) about 1 s after start. Findly code does not cause it. `--disable-background-networking --disable-component-update --disable-domain-reliability --no-pings --disable-client-side-phishing-detection --disable-sync` (tested through a patched copy of Wails) did **not** stop it, and Wails v2 offers no way to pass browser arguments.
 - Accepted: `keepDistPlaceholder` writes `.gitkeep` in `closeBundle`, so a failed Vite build can leave dist without it and make `go build` fail until the next good build.
+
+## Phase 3 — T2 review fixes (2026-10-13)
+- **TEMP leak:** `TEMP`/`TMP` point to `Findly\tmp` only until the page is up (`OnDomReady`), then the user's values come back. Programs Findly opens later (Word, Edge, Explorer via ShellExecute) inherit the environment and must not put their temp or recovery files in the app folder. WebView2's browser process copied the environment at start, and its `.tmp` files still land in `Findly\tmp` (verified).
+- **Registry clutter from tests:** Windows 11 permanently records every program that showed a tray icon (`HKCU\Control Panel\NotifyIconSettings`, visible in Settings > Taskbar). Tests now use `Options.NoTrayIcon`, so `go test` adds no entries and needs no running Explorer.
+- **Outside WM_CLOSE:** `Close()` uses a private message (`WM_APP+3`); a WM_CLOSE from another program is ignored. Before, it silently removed the tray, the hotkey and the foreground hook while Findly kept running.
+- **Thread:** the desktop goroutine keeps its OS thread locked until it exits, so Go ends the thread instead of reusing one that may hold a queued WM_QUIT.
+- **Tray icon is not required at start:** a failed `NIM_ADD` (e.g. at logon before the taskbar exists, or a Shell_NotifyIcon timeout) is no longer fatal; `TaskbarCreated` adds the icon later. `Start` fails only if the window can't be created.
+- **Tooltip:** NUL characters are dropped and the 127-unit cut never splits a surrogate pair. The old test passed 500 NULs, which never exercised the cut; it now does.
+- **Races:** `desktop`/`hotkeyWarning` are guarded by a mutex. Startup runs in parallel with the page, so the warning is also sent as an event, and the page never clears it.
+- **Panel:** an event in the same tick as showing counts as stale (the tick moves in ~16 ms steps, and the tray click that opened the panel can share it). Esc does not return focus to the taskbar or tray overflow (`Window.IsShell`). Esc during IME composition only cancels the composition.
+- `Close` twice and `SetTooltip` after `Close` do nothing. The tray icon is loaded with `LR_SHARED` (Windows owns the handle). The comments now say which calls run on which thread.
+- **Accepted:**
+  - `WindowShow` is asynchronous (posted to the UI thread), while `WindowHide` is direct. A show and a hide very close together can end with the window and the state disagreeing; the next hotkey fixes it.
+  - `Window.Ours` compares process IDs, so WebView2 pop-ups (another process) would count as "another program". Check this in T4 if the panel ever opens pop-ups.

@@ -4,15 +4,17 @@
 // icon with its menu (plan 10.4) and the global search hotkey (plan 10.2).
 //
 // Both live on one hidden window, owned by one OS thread that runs a Windows message
-// loop. Every Win32 call happens on that thread; other goroutines talk to it by posting
-// messages.
+// loop. Window, tray and hotkey calls happen on that thread; other goroutines talk to it
+// by posting messages.
 package desktop
 
 import (
 	"errors"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync"
+	"unicode/utf16"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -53,6 +55,9 @@ type Options struct {
 	OnHotkey func() // the hotkey was pressed
 	OnOpen   func() // tray icon clicked, or "Open search" chosen
 	OnQuit   func() // "Quit Findly" chosen
+	// NoTrayIcon skips the tray icon (tests: Windows permanently remembers every program
+	// that ever showed one, in Settings > Taskbar).
+	NoTrayIcon bool
 	// OnForeground is called whenever another window comes to the front (any program),
 	// with the time it happened (see Now). Used to close the panel on a click elsewhere.
 	OnForeground func(w Window, at uint32)
@@ -70,6 +75,7 @@ type Desktop struct {
 	taskbarCreated uint32  // message sent when Explorer restarts: add the icon again
 	winEventHook   uintptr // foreground-change hook, 0 if none
 	icon           windows.Handle
+	iconAdded      bool // the tray icon exists (desktop thread only)
 }
 
 const (
@@ -77,6 +83,7 @@ const (
 	trayID        = 1
 	msgTray       = wmApp + 1 // tray icon mouse events
 	msgSetTooltip = wmApp + 2
+	msgClose      = wmApp + 3 // private: a WM_CLOSE from another program must not remove the tray
 
 	cmdOpen = 1
 	cmdQuit = 2
@@ -125,12 +132,17 @@ func (d *Desktop) SetTooltip(s string) {
 	d.mu.Lock()
 	d.tooltip = s
 	d.mu.Unlock()
-	procPostMessageW.Call(uintptr(d.hwnd), msgSetTooltip, 0, 0)
+	if !d.closed() {
+		procPostMessageW.Call(uintptr(d.hwnd), msgSetTooltip, 0, 0)
+	}
 }
 
-// Close removes the tray icon, releases the hotkey and stops the desktop thread.
+// Close removes the tray icon, releases the hotkey and stops the desktop thread. Calling
+// it again, or SetTooltip after it, does nothing.
 func (d *Desktop) Close() {
-	procPostMessageW.Call(uintptr(d.hwnd), wmClose, 0, 0)
+	if !d.closed() {
+		procPostMessageW.Call(uintptr(d.hwnd), msgClose, 0, 0)
+	}
 	<-d.done
 }
 
@@ -138,7 +150,8 @@ func (d *Desktop) Close() {
 // window's messages to the thread that created it.
 func (d *Desktop) loop(ready chan<- error) {
 	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
+	// Never unlocked: the thread may still hold Windows state (a queued WM_QUIT, the
+	// window class registration), so Go ends it with this goroutine instead of reusing it.
 	defer func() {
 		currentMu.Lock()
 		current = nil
@@ -201,11 +214,30 @@ func (d *Desktop) create() error {
 	}
 	d.hwnd = windows.HWND(h)
 	d.icon = loadIcon(inst)
-	if err := d.notify(nimAdd); err != nil {
-		procDestroyWindow.Call(h)
-		return err
-	}
+	d.addIcon()
 	return nil
+}
+
+// addIcon adds the tray icon. A failure is not fatal: at logon the taskbar may not exist
+// yet, and Explorer's TaskbarCreated message later triggers another try. (Shell_NotifyIcon
+// can also report a timeout although the icon was added; a second add then just fails.)
+func (d *Desktop) addIcon() {
+	if d.opts.NoTrayIcon {
+		return
+	}
+	if d.notify(nimAdd) == nil {
+		d.iconAdded = true
+	}
+}
+
+// closed reports whether the desktop thread has ended.
+func (d *Desktop) closed() bool {
+	select {
+	case <-d.done:
+		return true
+	default:
+		return false
+	}
 }
 
 func (d *Desktop) registerHotkey() error {
@@ -228,14 +260,28 @@ func (d *Desktop) notify(op uintptr) error {
 		nid.CallbackMessage = msgTray
 		nid.Icon = d.icon
 		d.mu.Lock()
-		tip, _ := windows.UTF16FromString(d.tooltip)
+		tip := tooltipUTF16(d.tooltip, len(nid.Tip)-1) // leaves a terminating zero
 		d.mu.Unlock()
-		copy(nid.Tip[:len(nid.Tip)-1], tip) // always leaves a terminating zero
+		copy(nid.Tip[:], tip)
 	}
 	if r, _, e := procShellNotifyIconW.Call(op, uintptr(unsafe.Pointer(&nid))); r == 0 {
 		return fmt.Errorf("desktop: Shell_NotifyIcon(%d): %w", op, e)
 	}
 	return nil
+}
+
+// tooltipUTF16 encodes s for the tray tooltip in at most max UTF-16 units. NUL characters
+// are dropped (they would end the text early), and the cut never splits an emoji or
+// other character that needs two UTF-16 units.
+func tooltipUTF16(s string, max int) []uint16 {
+	u := utf16.Encode([]rune(strings.ReplaceAll(s, "\x00", "")))
+	if len(u) > max {
+		u = u[:max]
+		if utf16.IsSurrogate(rune(u[max-1])) && u[max-1] < 0xDC00 { // a lone high surrogate
+			u = u[:max-1]
+		}
+	}
+	return u
 }
 
 func wndProc(hwnd, message, wParam, lParam uintptr) uintptr {
@@ -263,21 +309,27 @@ func wndProc(hwnd, message, wParam, lParam uintptr) uintptr {
 	case msgSetTooltip:
 		d.notify(nimModify)
 		return 0
-	case wmClose:
+	case msgClose:
 		if d.winEventHook != 0 {
 			procUnhookWinEvent.Call(d.winEventHook)
 			d.winEventHook = 0
 		}
 		procUnregisterHotKey.Call(hwnd, hotkeyID)
-		d.notify(nimDelete)
+		if d.iconAdded {
+			d.notify(nimDelete)
+		}
 		procDestroyWindow.Call(hwnd)
 		return 0
+	case wmClose:
+		return 0 // only Close() ends the desktop window (it is never shown, so no user closes it)
 	case wmDestroy:
 		procPostQuitMessage.Call(0)
 		return 0
 	}
 	if d.taskbarCreated != 0 && uint32(message) == d.taskbarCreated {
-		d.notify(nimAdd) // Explorer restarted and lost all tray icons
+		// Explorer (re)started: it lost all tray icons, or was not running yet when
+		// Findly started (e.g. at logon).
+		d.addIcon()
 		return 0
 	}
 	r, _, _ := procDefWindowProcW.Call(hwnd, message, wParam, lParam)
@@ -340,7 +392,7 @@ func appendItem(menu uintptr, id int, text string) {
 func loadIcon(inst windows.Handle) windows.Handle {
 	cx, _, _ := procGetSystemMetrics.Call(smCxSmIcon)
 	cy, _, _ := procGetSystemMetrics.Call(smCySmIcon)
-	h, _, _ := procLoadImageW.Call(uintptr(inst), appIconResource, imageIcon, cx, cy, lrDefaultColor)
+	h, _, _ := procLoadImageW.Call(uintptr(inst), appIconResource, imageIcon, cx, cy, lrShared)
 	if h == 0 {
 		h, _, _ = procLoadIconW.Call(0, idiApplication)
 	}

@@ -28,6 +28,24 @@ func (w Window) Ours() bool {
 	return pid == windows.GetCurrentProcessId()
 }
 
+// shellClasses are the taskbar and its tray overflow. When the panel was opened from the
+// tray icon, one of them is "the window the user was in", but returning focus there
+// would be pointless.
+var shellClasses = map[string]bool{
+	"Shell_TrayWnd": true, "Shell_SecondaryTrayWnd": true,
+	"NotifyIconOverflowWindow": true, "TopLevelWindowForOverflowXamlIsland": true,
+}
+
+// IsShell reports whether w is the taskbar or the tray overflow.
+func (w Window) IsShell() bool {
+	if w == 0 {
+		return false
+	}
+	var buf [64]uint16
+	n, _, _ := procGetClassNameW.Call(uintptr(w), uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+	return n > 0 && shellClasses[windows.UTF16ToString(buf[:n])]
+}
+
 // Activate brings w back to the front, if it still exists. Windows allows it only while
 // this process is in the foreground, which is the case right after the user pressed Esc
 // in the panel.

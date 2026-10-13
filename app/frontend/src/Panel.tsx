@@ -12,7 +12,11 @@ export function Panel() {
   const input = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    Info().then((i) => setWarning(i.hotkeyWarning));
+    Info().then((i) => {
+      if (i.hotkeyWarning) setWarning(i.hotkeyWarning); // never clear a warning the event set
+    });
+    // The warning can be set after the page asked: startup runs in parallel.
+    const offWarning = EventsOn("hotkey:warning", (w: string) => setWarning(w));
     // Each time the panel is shown, start from the input with the old text selected,
     // so typing replaces it.
     const off = EventsOn("panel:shown", () => {
@@ -21,7 +25,9 @@ export function Panel() {
     });
     // On the window, not an element: Esc must work wherever focus is in the page.
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
+      // During IME composition (Japanese, Chinese, Hindi input...) Esc cancels the
+      // composition, not the panel.
+      if (e.key === "Escape" && !e.isComposing) {
         e.preventDefault();
         HidePanel();
       }
@@ -29,6 +35,7 @@ export function Panel() {
     window.addEventListener("keydown", onKey);
     return () => {
       off();
+      offWarning();
       window.removeEventListener("keydown", onKey);
     };
   }, []);

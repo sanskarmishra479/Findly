@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -31,6 +32,11 @@ type App struct {
 	fs    *appfs.FS
 	panel panelState
 
+	onDomReady func() // set before wails.Run; runs once the page has loaded
+
+	// mu guards desktop and hotkeyWarning: startup runs on its own goroutine while the
+	// page may already call Info.
+	mu            sync.Mutex
 	desktop       *desktop.Desktop // tray icon and hotkey
 	hotkeyWarning string           // set when another program owns the hotkey
 }
@@ -59,7 +65,11 @@ func (a *App) startup(ctx context.Context) {
 	case errors.Is(err, desktop.ErrHotkeyInUse):
 		// The tray still works; say why the hotkey does nothing (settings will offer
 		// another combination in T7).
-		a.hotkeyWarning = "Ctrl+Shift+Space is used by another program. Open Findly from the tray icon."
+		const warning = "Ctrl+Shift+Space is used by another program. Open Findly from the tray icon."
+		a.mu.Lock()
+		a.hotkeyWarning = warning
+		a.mu.Unlock()
+		runtime.EventsEmit(ctx, "hotkey:warning", warning) // the page may have asked Info already
 		d.SetTooltip("Findly: hotkey in use, click to search")
 	case err != nil:
 		// No tray and no hotkey: the app could not be reached at all, so say so and stop.
@@ -67,12 +77,17 @@ func (a *App) startup(ctx context.Context) {
 		runtime.Quit(ctx)
 		return
 	}
+	a.mu.Lock()
 	a.desktop = d
+	a.mu.Unlock()
 }
 
 func (a *App) shutdown(ctx context.Context) {
-	if a.desktop != nil {
-		a.desktop.Close()
+	a.mu.Lock()
+	d := a.desktop
+	a.mu.Unlock()
+	if d != nil {
+		d.Close()
 	}
 }
 
@@ -87,8 +102,8 @@ func (a *App) ShowPanel() {
 		return
 	}
 	prev := desktop.Foreground()
-	if prev.Ours() {
-		prev = 0 // the panel is already in front
+	if prev.Ours() || prev.IsShell() {
+		prev = 0 // the panel is already in front, or opened from the taskbar tray
 	}
 	a.panel.show(prev, desktop.Now())
 	runtime.WindowCenter(ctx)
@@ -128,5 +143,14 @@ type Info struct {
 
 // Info returns the version and the app data folder.
 func (a *App) Info() Info {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	return Info{Version: Version, DataDir: a.fs.Dir(), HotkeyWarning: a.hotkeyWarning}
+}
+
+// domReady runs when the page has loaded, i.e. the WebView2 browser process is running.
+func (a *App) domReady(ctx context.Context) {
+	if a.onDomReady != nil {
+		a.onDomReady()
+	}
 }
