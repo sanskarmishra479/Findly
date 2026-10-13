@@ -455,6 +455,10 @@ func (e *Engine) embedPending(ctx context.Context) error {
 			// Otherwise the model itself is broken (or the file is still getting its
 			// strikes): nobody is blamed; everything keeps waiting for the retry.
 		}
+		if ctx.Err() != nil {
+			// Paused or interrupted (possibly during the model check): not a model failure.
+			return ctx.Err()
+		}
 		e.reloadCache()
 		if err == nil {
 			e.resetRetry()
@@ -521,7 +525,10 @@ func (e *Engine) reloadCache() {
 		if e.ctx.Err() == nil {
 			e.setStatus(Status{State: StateError, Err: "loading vectors: " + err.Error()})
 		}
-		return // still dirty: retried with the next reload
+		e.mu.Lock()
+		e.dirty = true // retried with the next reload
+		e.mu.Unlock()
+		return
 	}
 	e.mu.Lock()
 	e.dirty = false
