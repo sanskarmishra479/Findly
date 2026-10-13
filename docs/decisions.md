@@ -352,3 +352,10 @@ Real folder: `C:\Users\sansk\OneDrive\Documents` (user's OK), Vulkan, separate t
   - Copying a failed twin also copies its explanation into `files.error`.
   - The app opens the engine in the background (large indexes take seconds to load). An engine that finishes opening after quit closes itself.
   - `FINDLY_DEV_THIRD_PARTY` only works in development builds (`wails build -tags devpaths`), so an environment variable can never choose which llama-server.exe a release build runs.
+- **Verification follow-up (stuck files vs. a broken model):**
+  - Blaming the file a pass stopped on 3 times also blamed good files when the model itself was broken: every retry resumes at the same first waiting file.
+  - Now, after 3 strikes, `modelWorks` restarts the model and checks it on a test passage. If that fails, the model is broken and nobody is blamed. If it works, the file gets one more try on that fresh model, and only if it fails again is it given up.
+  - `TestBrokenModelBlamesNoFile` (a model that fails everything for its first 4 starts) fails on the previous code.
+  - The model now starts during indexing only for files actually stored: postponed files are subtracted too (`index.Progress.Postponed`).
+  - The cache's dirty mark is cleared only after a successful reload.
+  - Accepted (pre-existing): `pool.drop()` after a model error also closes the model under a search holding a lease; that search gets an error and the next one starts a fresh model.

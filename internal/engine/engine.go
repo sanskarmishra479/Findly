@@ -383,7 +383,7 @@ func (e *Engine) indexRoot(ctx context.Context, r store.Root) error {
 			// The first stored file means vectors will be needed: start the model now, in
 			// parallel with reading the remaining files.
 			// (Only files actually stored count: failed or over-limit files need no model.)
-			if !started && p.Done-p.Failed-p.Skipped > 0 && e.cfg.StartModel != nil {
+			if !started && p.Done-p.Failed-p.Skipped-p.Postponed > 0 && e.cfg.StartModel != nil {
 				started = true
 				e.pool.startAsync(e.cfg.IndexIdle, true)
 			}
@@ -412,17 +412,17 @@ func (e *Engine) embedPending(ctx context.Context) error {
 		return err // with no model yet: keyword search only, passages wait
 	}
 	e.setStatus(Status{State: StateEmbedding})
-	m, release, err := e.pool.get(ctx, e.cfg.IndexIdle, true)
-	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		return fmt.Errorf("%w: %w", index.ErrEmbedder, err)
-	}
-	defer release()
-	ix := &index.Indexer{Store: e.store, Embedder: m}
 	last := time.Now()
+	var retried int64 // a suspected file being given one more try on a model just proven to work
 	for {
+		m, release, err := e.pool.get(ctx, e.cfg.IndexIdle, true)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("%w: %w", index.ErrEmbedder, err)
+		}
+		ix := &index.Indexer{Store: e.store, Embedder: m}
 		st, err := ix.EmbedPending(ctx, func(p index.EmbedProgress) {
 			e.setStatus(Status{State: StateEmbedding, Passages: p.Passages, Waiting: p.Waiting})
 			// Make new vectors searchable now and then, not only at the end.
@@ -431,8 +431,29 @@ func (e *Engine) embedPending(ctx context.Context) error {
 				last = time.Now()
 			}
 		})
-		if err != nil && st.Stuck != 0 && e.giveUp(ctx, st.Stuck) {
-			continue // that file is now keyword-only; go on with the others
+		release()
+
+		if err != nil && st.Stuck != 0 {
+			switch {
+			case st.Stuck == retried:
+				// It failed again right after the model handled a test passage: the file
+				// itself breaks the model. Give up on it (it stays keyword-searchable).
+				if merr := e.store.MarkEmbedFailed(ctx, st.Stuck,
+					"the embedding model fails on this file"); merr != nil {
+					return merr
+				}
+				e.forget(st.Stuck)
+				retried = 0
+				e.pool.drop()
+				continue
+			case e.strike(st.Stuck) >= maxStuck && e.modelWorks(ctx):
+				// The same file stopped the pass maxStuck times, yet a fresh model handles a
+				// test passage: try the file once more on it.
+				retried = st.Stuck
+				continue
+			}
+			// Otherwise the model itself is broken (or the file is still getting its
+			// strikes): nobody is blamed; everything keeps waiting for the retry.
 		}
 		e.reloadCache()
 		if err == nil {
@@ -442,28 +463,40 @@ func (e *Engine) embedPending(ctx context.Context) error {
 	}
 }
 
-// maxStuck: a file the embedding pass stopped on this many times in a row is given up
-// (keyword search only). Otherwise, because the pass always resumes at the first waiting
-// file, one bad file would block meaning search for every file after it.
+// modelWorks restarts the model and checks it on a test passage. A pass can stop on a
+// file because of the file or because the model is broken; this tells them apart, so a
+// broken model never gets a good file blamed.
+func (e *Engine) modelWorks(ctx context.Context) bool {
+	e.pool.drop()
+	m, release, err := e.pool.get(ctx, e.cfg.IndexIdle, true)
+	if err != nil {
+		return false
+	}
+	defer release()
+	_, err = m.EmbedPassages(ctx, "check", []string{"A short test sentence to check the search model."})
+	return err == nil
+}
+
+// maxStuck: a file the embedding pass stopped on this many times in a row is checked (see
+// modelWorks). Otherwise, because the pass always resumes at the first waiting file, one
+// bad file would block meaning search for every file after it.
 const maxStuck = 3
 
 // maxRetryDelay caps the wait between retries after errors.
 const maxRetryDelay = time.Hour
 
-// giveUp counts a failed pass on file id and reports whether the file was now given up.
-func (e *Engine) giveUp(ctx context.Context, id int64) bool {
+// strike counts a failed pass on file id and returns its count.
+func (e *Engine) strike(id int64) int {
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.stuck[id]++
-	n := e.stuck[id]
-	if n >= maxStuck {
-		delete(e.stuck, id)
-	}
+	return e.stuck[id]
+}
+
+func (e *Engine) forget(id int64) {
+	e.mu.Lock()
+	delete(e.stuck, id)
 	e.mu.Unlock()
-	if n < maxStuck {
-		return false
-	}
-	err := e.store.MarkEmbedFailed(ctx, id, fmt.Sprintf("the embedding model failed on this file %d times", maxStuck))
-	return err == nil
 }
 
 // resetRetry: work succeeded, so the next error waits the shortest time again.
@@ -484,12 +517,15 @@ func (e *Engine) reloadIfDirty() {
 }
 
 func (e *Engine) reloadCache() {
+	if err := e.cache.Load(e.ctx, e.store); err != nil {
+		if e.ctx.Err() == nil {
+			e.setStatus(Status{State: StateError, Err: "loading vectors: " + err.Error()})
+		}
+		return // still dirty: retried with the next reload
+	}
 	e.mu.Lock()
 	e.dirty = false
 	e.mu.Unlock()
-	if err := e.cache.Load(e.ctx, e.store); err != nil && e.ctx.Err() == nil {
-		e.setStatus(Status{State: StateError, Err: "loading vectors: " + err.Error()})
-	}
 }
 
 // removeThumbs deletes thumbnails of removed index entries (P-5). Paths come from the

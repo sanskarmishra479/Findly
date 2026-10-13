@@ -19,16 +19,17 @@ import (
 
 // fakeModel embeds instantly (or waits on gate, if set).
 type fakeModel struct {
-	gate   chan struct{}
-	failOn string // passages containing this get a server error (not the input's fault)
-	closed atomic.Bool
-	calls  atomic.Int64
+	gate    chan struct{}
+	failOn  string // passages containing this get a server error (not the input's fault)
+	failAll bool   // a broken model: every request fails
+	closed  atomic.Bool
+	calls   atomic.Int64
 }
 
 func (m *fakeModel) EmbedPassages(ctx context.Context, _ string, texts []string) ([]embed.Vector, error) {
 	m.calls.Add(1)
 	for _, t := range texts {
-		if m.failOn != "" && strings.Contains(t, m.failOn) {
+		if m.failAll || m.failOn != "" && strings.Contains(t, m.failOn) {
 			return nil, errors.New("embed: request: connection reset")
 		}
 	}
@@ -61,6 +62,7 @@ type starter struct {
 	err    error
 	gate   chan struct{}
 	failOn string
+	broken int // the first this-many models started are broken
 	delay  time.Duration
 }
 
@@ -75,7 +77,7 @@ func (s *starter) start(ctx context.Context, low bool) (Model, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
-	m := &fakeModel{gate: s.gate, failOn: s.failOn}
+	m := &fakeModel{gate: s.gate, failOn: s.failOn, failAll: len(s.models) < s.broken}
 	s.models = append(s.models, m)
 	s.low = append(s.low, low)
 	return m, nil
@@ -315,5 +317,20 @@ func TestCloseDuringStartAndAfter(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if s.count() != 0 {
 		t.Fatalf("%d models started after Close", s.count())
+	}
+}
+
+// T3 verification review: a broken model (every request fails for a while) must never
+// get a good file blamed; once it works again, every file gets its vectors.
+func TestBrokenModelBlamesNoFile(t *testing.T) {
+	s := &starter{broken: 4}
+	e := newEngine(t, s, time.Minute, func(c *Config) { c.retryAfter = 10 * time.Millisecond })
+	dir := folder(t, map[string]string{"a.txt": "first good passage", "b.txt": "second good passage"})
+	e.AddFolder(context.Background(), dir)
+	waitUntil(t, "all vectors after the model recovered", func() bool { return pending(t, e) == 0 && e.Cache().Len() == 2 })
+	for _, name := range []string{"a.txt", "b.txt"} {
+		if f, _, _ := e.Store().FileByPath(context.Background(), filepath.Join(dir, name)); f.Error != "" {
+			t.Errorf("%s was blamed for a broken model: %q", name, f.Error)
+		}
 	}
 }

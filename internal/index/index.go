@@ -48,6 +48,9 @@ type Progress struct {
 	Done    int // finished: indexed, failed, skipped or postponed
 	Failed  int
 	Skipped int // over the free-tier limit
+	// Postponed: not processed now through no fault of the file (e.g. the PDF engine was
+	// busy); retried on the next run.
+	Postponed int
 }
 
 // Indexer indexes roots into a store.
@@ -262,6 +265,7 @@ func (ix *Indexer) run(ctx context.Context, rootPath string, jobs []job, st *Sta
 			prog.Skipped++
 		case store.StatusPending:
 			st.Postponed++
+			prog.Postponed++
 		}
 		if ix.OnProgress != nil {
 			ix.OnProgress(prog)
