@@ -76,6 +76,7 @@ Built on **Google DeepMind's EmbeddingGemma 2** (open model, Apache 2.0), run lo
 
 ### 3.3 Offline
 - **O-1** After setup, the app makes **zero automatic network connections**.
+  - **Known exception (accepted 2026-10-13, user decision):** the Windows WebView2 runtime that draws the UI opens one HTTPS connection to Microsoft at start for its own maintenance. Findly sends nothing through it (no file names, no queries), and everything works offline (O-4). Chromium flags and Wails v2 options cannot turn it off; revisit with Wails v3 or newer WebView2 versions. The privacy page must say: "Findly itself sends nothing. The Windows web view it uses may contact Microsoft for its own updates."
 - **O-2** The only network uses are: model download (first run, or when a new modality is needed), license activation (once, user-initiated), and a manual "Check for updates" button.
 - **O-3** Model download can be replaced by "Import model files" from disk.
 - **O-4** The app must fully work (index + search) with networking disabled. Tested before each release.

@@ -39,7 +39,7 @@
 ## Phase 3 — Desktop app (built before Phase 2)
 - [x] T1 Wails v2 skeleton: `app/` + `app/frontend/`, pinned deps, WebView data in the app folder, single instance, CSP, starts hidden
 - [x] T2 Tray icon + global hotkey (+ T1 review fixes)
-- [ ] Decide: WebView2 opens one connection to Microsoft at start (O-1)
+- [x] Decided: accept WebView2's own connection to Microsoft at start, documented in plan O-1 (revisit with Wails v3)
 - [ ] T3 Engine service (background indexing, model lifetime, keyword-first indexing)
 - [ ] T4 Search panel (keyword-first + meaning merge, keyboard navigation)
 - [ ] T5 Opener (open, PDF at page, show in Explorer, copy file)
