@@ -6,8 +6,4 @@ export function HidePanel():Promise<void>;
 
 export function Info():Promise<main.Info>;
 
-export function PanelBlurred():Promise<void>;
-
-export function PanelFocused():Promise<void>;
-
 export function ShowPanel():Promise<void>;

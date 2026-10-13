@@ -10,14 +10,6 @@ export function Info() {
   return window['go']['main']['App']['Info']();
 }
 
-export function PanelBlurred() {
-  return window['go']['main']['App']['PanelBlurred']();
-}
-
-export function PanelFocused() {
-  return window['go']['main']['App']['PanelFocused']();
-}
-
 export function ShowPanel() {
   return window['go']['main']['App']['ShowPanel']();
 }

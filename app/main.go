@@ -14,6 +14,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
 
 	"github.com/sanskarmishra479/findly/internal/appfs"
+	"github.com/sanskarmishra479/findly/internal/desktop"
 )
 
 // The built UI (app/frontend/dist) is compiled into the exe: the window never loads
@@ -27,15 +28,19 @@ var assets embed.FS
 const singleInstanceID = "findly-2869cc4d-271b-4b33-8ae8-0763dfc7eabc"
 
 func main() {
-	// Must run before wails.Run, which hands a second start over to the running copy.
-	allowForeground()
+	// A second start hands over to the running copy inside wails.Run and exits. Before
+	// that, let the running copy (only that process) bring its panel to the front.
+	desktop.AllowForeground("wails-app-"+singleInstanceID+"-sic", "wails-app-"+singleInstanceID+"-siw")
 	if err := run(); err != nil {
 		// No console in a GUI build: show the error in a message box instead.
-		fatalBox("Findly could not start", err.Error())
+		desktop.MessageBox("Findly could not start", err.Error())
 		os.Exit(1)
 	}
 }
 
+// run keeps the work before wails.Run small: it also runs for every second start (which
+// exits inside wails.Run) and when `wails build` runs the exe to generate bindings.
+// Opening the index and other heavy setup belong in App.startup.
 func run() error {
 	dir, err := appfs.DefaultDir()
 	if err != nil {
@@ -50,6 +55,14 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// WebView2 creates temporary files in %TEMP%. Point TEMP at the app folder so every
+	// write stays inside it (plan I-3); helper programs get their own environment anyway.
+	tmp, err := afs.Path(appfs.DirTmp)
+	if err != nil {
+		return err
+	}
+	os.Setenv("TEMP", tmp)
+	os.Setenv("TMP", tmp)
 
 	app := newApp(afs)
 	err = wails.Run(&options.App{

@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"github.com/sanskarmishra479/findly/internal/appfs"
+	"github.com/sanskarmishra479/findly/internal/desktop"
 )
 
 // Version is the app version shown in About.
@@ -23,16 +25,56 @@ const (
 // in frontend/wailsjs/go/main/App. Keep it to what the UI needs: no method may write,
 // move or delete user files (plan I-6).
 type App struct {
-	ctx    context.Context // set in startup; Wails runtime calls need it
-	active atomic.Bool     // the panel was really the active window since it was shown
-	fs     *appfs.FS
+	// ctx is set in startup. Wails may deliver a second start (secondInstance) before
+	// startup has run, on another goroutine, so it is read and written atomically.
+	ctx   atomic.Pointer[context.Context]
+	fs    *appfs.FS
+	panel panelState
+
+	desktop       *desktop.Desktop // tray icon and hotkey
+	hotkeyWarning string           // set when another program owns the hotkey
 }
 
 func newApp(fs *appfs.FS) *App { return &App{fs: fs} }
 
-func (a *App) startup(ctx context.Context) { a.ctx = ctx }
+// context returns the Wails context, or nil before startup.
+func (a *App) context() context.Context {
+	if c := a.ctx.Load(); c != nil {
+		return *c
+	}
+	return nil
+}
 
-func (a *App) shutdown(ctx context.Context) {}
+func (a *App) startup(ctx context.Context) {
+	a.ctx.Store(&ctx)
+	d, err := desktop.Start(desktop.Options{
+		Tooltip:      "Findly: Ctrl+Shift+Space to search",
+		Hotkey:       desktop.DefaultHotkey,
+		OnHotkey:     a.ShowPanel,
+		OnOpen:       a.ShowPanel,
+		OnQuit:       func() { runtime.Quit(ctx) },
+		OnForeground: a.foreground,
+	})
+	switch {
+	case errors.Is(err, desktop.ErrHotkeyInUse):
+		// The tray still works; say why the hotkey does nothing (settings will offer
+		// another combination in T7).
+		a.hotkeyWarning = "Ctrl+Shift+Space is used by another program. Open Findly from the tray icon."
+		d.SetTooltip("Findly: hotkey in use, click to search")
+	case err != nil:
+		// No tray and no hotkey: the app could not be reached at all, so say so and stop.
+		desktop.MessageBox("Findly could not start", err.Error())
+		runtime.Quit(ctx)
+		return
+	}
+	a.desktop = d
+}
+
+func (a *App) shutdown(ctx context.Context) {
+	if a.desktop != nil {
+		a.desktop.Close()
+	}
+}
 
 // secondInstance runs when the exe is started again while Findly is running: show the
 // panel instead of starting a second copy.
@@ -40,45 +82,51 @@ func (a *App) secondInstance(options.SecondInstanceData) { a.ShowPanel() }
 
 // ShowPanel centers the search panel on the current screen and brings it to the front.
 func (a *App) ShowPanel() {
-	if a.ctx == nil {
+	ctx := a.context()
+	if ctx == nil {
 		return
 	}
-	a.active.Store(false)
-	runtime.WindowCenter(a.ctx)
-	runtime.WindowShow(a.ctx)
-	runtime.EventsEmit(a.ctx, "panel:shown")
+	prev := desktop.Foreground()
+	if prev.Ours() {
+		prev = 0 // the panel is already in front
+	}
+	a.panel.show(prev, desktop.Now())
+	runtime.WindowCenter(ctx)
+	runtime.WindowShow(ctx)
+	runtime.EventsEmit(ctx, "panel:shown")
 }
 
-// HidePanel hides the panel (Esc).
+// HidePanel closes the panel (Esc) and returns to the window the user was in, so they
+// can keep typing there.
 func (a *App) HidePanel() {
-	if a.ctx != nil {
-		runtime.WindowHide(a.ctx)
+	ctx := a.context()
+	if ctx == nil {
+		return
 	}
+	prev := a.panel.hide()
+	runtime.WindowHide(ctx)
+	prev.Activate()
 }
 
-// PanelFocused is called by the UI when the panel gets keyboard focus. It records
-// whether Windows really made the panel the active window.
-func (a *App) PanelFocused() {
-	if isForeground() {
-		a.active.Store(true)
-	}
-}
-
-// PanelBlurred is called by the UI when the panel loses focus. Clicking elsewhere closes
-// the panel, but only if it was really active: when Windows refuses to bring it to the
-// front (it may for programs in the background), the panel stays open until the user
-// clicks it, instead of disappearing at once.
-func (a *App) PanelBlurred() {
-	if a.active.Load() && !isForeground() {
-		a.HidePanel()
+// foreground runs when any window comes to the front: a click or switch to another
+// program closes the panel, like other launchers.
+func (a *App) foreground(w desktop.Window, at uint32) {
+	if a.panel.foreground(w.Ours(), at) {
+		if ctx := a.context(); ctx != nil {
+			runtime.WindowHide(ctx)
+		}
 	}
 }
 
 // Info is shown in the UI's About section.
 type Info struct {
 	Version string `json:"version"`
-	DataDir string `json:"dataDir"`
+	// HotkeyWarning is non-empty when the search hotkey could not be registered.
+	HotkeyWarning string `json:"hotkeyWarning"`
+	DataDir       string `json:"dataDir"`
 }
 
 // Info returns the version and the app data folder.
-func (a *App) Info() Info { return Info{Version: Version, DataDir: a.fs.Dir()} }
+func (a *App) Info() Info {
+	return Info{Version: Version, DataDir: a.fs.Dir(), HotkeyWarning: a.hotkeyWarning}
+}

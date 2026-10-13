@@ -2,6 +2,7 @@ export namespace main {
 	
 	export class Info {
 	    version: string;
+	    hotkeyWarning: string;
 	    dataDir: string;
 	
 	    static createFrom(source: any = {}) {
@@ -11,6 +12,7 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.version = source["version"];
+	        this.hotkeyWarning = source["hotkeyWarning"];
 	        this.dataDir = source["dataDir"];
 	    }
 	}

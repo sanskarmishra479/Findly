@@ -23,9 +23,12 @@ function contentSecurityPolicy(): Plugin {
     name: "findly-csp",
     apply: "build",
     transformIndexHtml(html) {
+      // Right after the charset declaration, which must come first.
+      const charset = '<meta charset="UTF-8" />';
+      if (!html.includes(charset)) throw new Error("index.html: charset meta not found");
       return html.replace(
-        "<head>",
-        `<head>\n    <meta http-equiv="Content-Security-Policy" content="${csp}" />`,
+        charset,
+        `${charset}\n    <meta http-equiv="Content-Security-Policy" content="${csp}" />`,
       );
     },
   };

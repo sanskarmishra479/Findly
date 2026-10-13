@@ -39,6 +39,8 @@ const (
 	// DirWebview holds WebView2's browser data for the app window. WebView2 writes it
 	// itself; without this setting it would go to %APPDATA%, outside the app folder.
 	DirWebview = "webview"
+	// DirTmp is the TEMP folder for the app process (WebView2 writes temporary files).
+	DirTmp = "tmp"
 )
 
 // ErrOutside is returned for paths that are absolute or leave the app directory.
@@ -72,7 +74,7 @@ func Open(dir string) (*FS, error) {
 		return nil, err
 	}
 	f := &FS{root: root, path: filepath.Clean(dir)}
-	for _, sub := range []string{DirModels, DirIndex, DirThumbs, DirLogs, DirBin, DirLicense, DirGPU, DirWebview} {
+	for _, sub := range []string{DirModels, DirIndex, DirThumbs, DirLogs, DirBin, DirLicense, DirGPU, DirWebview, DirTmp} {
 		if err := root.MkdirAll(sub, 0o700); err != nil {
 			root.Close()
 			return nil, err

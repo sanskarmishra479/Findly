@@ -1,41 +1,40 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react";
-import { HidePanel, PanelBlurred, PanelFocused } from "../wailsjs/go/main/App";
+import { useEffect, useRef, useState } from "react";
+import { HidePanel, Info } from "../wailsjs/go/main/App";
 import { EventsOn } from "../wailsjs/runtime/runtime";
 
-// The hotkey search panel (plan 10.2). T1: the shell only; results arrive in T4.
+// The hotkey search panel (plan 10.2). Results arrive in T4.
+//
+// Closing on a click elsewhere is handled in Go: Windows reports when another window
+// comes to the front, which is more reliable than the page's focus events.
 export function Panel() {
   const [query, setQuery] = useState("");
+  const [warning, setWarning] = useState("");
   const input = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    Info().then((i) => setWarning(i.hotkeyWarning));
     // Each time the panel is shown, start from the input with the old text selected,
     // so typing replaces it.
     const off = EventsOn("panel:shown", () => {
       input.current?.focus();
       input.current?.select();
     });
-    // Clicking anywhere else closes the panel, like other launchers. Go decides, because
-    // only Windows knows whether the panel really was the active window.
-    const onBlur = () => PanelBlurred();
-    const onFocus = () => PanelFocused();
-    window.addEventListener("focus", onFocus);
-    window.addEventListener("blur", onBlur);
+    // On the window, not an element: Esc must work wherever focus is in the page.
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        HidePanel();
+      }
+    };
+    window.addEventListener("keydown", onKey);
     return () => {
       off();
-      window.removeEventListener("blur", onBlur);
-      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("keydown", onKey);
     };
   }, []);
 
-  function onKeyDown(e: KeyboardEvent) {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      HidePanel();
-    }
-  }
-
   return (
-    <div className="panel" onKeyDown={onKeyDown}>
+    <div className="panel">
       <div className="search">
         <svg className="search-icon" viewBox="0 0 24 24" aria-hidden="true">
           <circle cx="10.5" cy="10.5" r="6.5" />
@@ -52,6 +51,7 @@ export function Panel() {
         />
       </div>
       <div className="results">
+        {warning && <p className="warning">{warning}</p>}
         <p className="hint">Results will appear here.</p>
       </div>
       <footer>
