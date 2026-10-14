@@ -20,10 +20,15 @@ import (
 // Version is the app version shown in About.
 const Version = "0.1.0-dev"
 
-// Search panel size in pixels (plan 10.2: about 680 px wide).
+// Search panel size in device-independent pixels (docs/design/search-panel.md): the bar alone,
+// and the same width grown downward when results show. It opens a fifth of the way down
+// the screen, so growing never moves the bar.
 const (
-	panelWidth  = 680
-	panelHeight = 460
+	panelWidth     = 860
+	barHeight      = 68
+	resultsHeight  = 540
+	panelFromTop   = 0.2
+	wailsWindowCls = "wailsWindow" // Wails v2's window class
 )
 
 // App is the API the UI can call. Every exported method becomes a JavaScript function
@@ -49,6 +54,7 @@ type App struct {
 	throttle      statusThrottle   // limits tooltip updates during indexing
 	quitting      bool             // shutdown has started
 
+	expanded  atomic.Bool  // the panel shows results (else just the search bar)
 	searches  searches     // cancels outdated searches while the user types
 	previews  previewCalls // cancels an outdated preview
 	pageCache pageCache    // recently rendered PDF pages
@@ -226,7 +232,8 @@ func (a *App) ShowPanel() {
 		prev = 0 // the panel is already in front, or opened from the taskbar tray
 	}
 	a.panel.show(prev, desktop.Now())
-	runtime.WindowCenter(ctx)
+	// On the monitor under the mouse, in the size the UI last asked for.
+	a.place(true)
 	runtime.WindowShow(ctx)
 	runtime.EventsEmit(ctx, "panel:shown")
 }
@@ -287,4 +294,22 @@ func (a *App) domReady(ctx context.Context) {
 	if a.onDomReady != nil {
 		a.onDomReady()
 	}
+}
+
+// SetExpanded is called by the UI when results appear (true) or the query is cleared
+// (false): the window grows downward from the bar, or shrinks back to it.
+func (a *App) SetExpanded(expanded bool) {
+	if a.expanded.Swap(expanded) != expanded {
+		a.place(false)
+	}
+}
+
+// place sizes and positions the panel window: centered, a fifth of the way down the
+// screen; onCursor picks the monitor under the mouse (when opening).
+func (a *App) place(onCursor bool) {
+	h := barHeight
+	if a.expanded.Load() {
+		h = resultsHeight
+	}
+	desktop.FindOwnWindow(wailsWindowCls).Place(panelWidth, h, panelFromTop, onCursor)
 }

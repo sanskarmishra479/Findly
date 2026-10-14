@@ -172,3 +172,32 @@ func windowsUTF16Ptr(s string) (unsafe.Pointer, error) {
 	p, err := windows.UTF16PtrFromString(s)
 	return unsafe.Pointer(p), err
 }
+
+func TestPlaceSizesAndPositions(t *testing.T) {
+	d, err := Start(Options{Hotkey: testHotkey, NoTrayIcon: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	w := Window(d.hwnd)
+	if err := w.Place(400, 300, 0.2, false); err != nil {
+		t.Fatal(err)
+	}
+	x, y, width, height := w.Rect()
+	if width < 400 || height < 300 || width*3 != height*4 {
+		t.Fatalf("size %dx%d: want 400x300 times the monitor's scale", width, height)
+	}
+	if x < -10000 || y < -10000 {
+		t.Fatalf("odd position %d,%d", x, y)
+	}
+	// Taller than any screen: clamped, never off screen.
+	if err := w.Place(400, 100000, 0.9, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, h := w.Rect(); h >= 100000 {
+		t.Fatalf("height %d was not clamped to the screen", h)
+	}
+	if FindOwnWindow("FindlyDesktopWindow") != w {
+		t.Fatal("FindOwnWindow did not find this process's window")
+	}
+}

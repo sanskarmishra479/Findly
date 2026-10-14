@@ -41,8 +41,8 @@
 - [x] T2 Tray icon + global hotkey (+ T1 review fixes)
 - [x] Decided: accept WebView2's own connection to Microsoft at start, documented in plan O-1 (revisit with Wails v3)
 - [x] T3 Engine service: [x] T3a keyword first, [x] T3b engine, [x] T3c app wiring
-- [ ] T4 Search panel (keyword-first + meaning merge, keyboard navigation)
-- [ ] T5 Opener (open, PDF at page, show in Explorer, copy file)
+- [x] T4 Search panel (keyword-first + meaning merge, keyboard navigation, PDF page previews)
+- [x] T5 Opener (open, PDF at page, show in Explorer, copy file)
 - [ ] T6 Model download + onboarding
 - [ ] T7 Settings + basic big window
 - [ ] T8 Backend auto-selection (Vulkan vs CPU)

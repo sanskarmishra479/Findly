@@ -369,3 +369,19 @@ Real folder: `C:\Users\sansk\OneDrive\Documents` (user's OK), Vulkan, separate t
   - **Text/Word:** the matching passage.
   - A newer preview cancels an older one; the last 24 rendered pages are cached in memory.
 - **PDF compile cache:** wazero's compilation cache in `%LOCALAPPDATA%\Findly\cache\wasm` (`appfs.DirCache`). Starting a PDF engine went from **6.0 s to 0.16 s** (measured). It is used by both engines, so indexing benefits too. The cache can always be rebuilt, and it is in the app folder (I-3).
+
+## Phase 3 — T4c panel UI + T5 opener (2026-10-14)
+- **Panel (docs/design/search-panel.md):**
+  - The bar alone (860 × 68) grows downward into two columns (860 × 540). Left: results grouped by kind (Documents, Images, …) with an icon, name, page badge and a snippet with the query words in bold. Right: the preview, name, folder, "PDF · date · pages · size", "Has your words" / "Matches meaning", and Open / Show in Explorer.
+  - Footer: status and shortcuts. Keys: ↑/↓, Enter (open), Ctrl+Enter (Explorer), Ctrl+C (copy the file, unless text is selected in the box), Esc. IME composition is respected.
+  - Word results on every keystroke; meaning results 300 ms after typing pauses; the selection stays on the same file when results change. Highlighted text is always rendered as text, never as HTML.
+  - Glass: transparent page + Windows 11 acrylic backdrop; follows light/dark.
+- **Placement:** `desktop.Window.Place` sizes and positions in one `SetWindowPos`, on the monitor under the mouse (when opening), centered, top at 0.2 of the work area, in that monitor's own DPI. Wails' `WindowSetPosition` mixes physical and logical pixels and only uses the window's current monitor. Measured at 125%: the bar 1075 × 85 px, the results view 1075 × 675 px, top at 0.20, centered.
+- **Opener (T5, `internal/opener`):**
+  - Open: ShellExecute "open". A PDF opens at its page when the user's PDF app supports it (looked up with `AssocQueryString`): Edge/Chrome/Firefox/Brave via `file:///…#page=N`, SumatraPDF `-page N`, Adobe `/A page=N`. Other apps open the file normally.
+  - **Programs and scripts** (`.exe`, `.bat`, `.ps1`, `.lnk`, `.msi`, …) are shown in Explorer instead of being run: a search result must never start a program by accident.
+  - Show in Explorer: `explorer.exe /select,"path"`.
+  - Copy: CF_HDROP plus "Preferred DropEffect" = copy (never a cut).
+  - Every action takes a result's index id (never a path from the UI) and checks with safefs that the file still exists and is not a link. Open and Explorer close the panel; Copy keeps it open.
+- **Dev preview mode:** with `npm run dev` in a normal browser, `devmock.ts` stands in for the Go backend with sample data. `main.tsx` imports it only when `import.meta.env.DEV`; verified that the production bundle contains none of it. `.claude/launch.json` starts it.
+- **Tests:** an end-to-end Go test of Search/Preview/OpenResult against a real engine and index; opener tests (page commands, runnable list, missing files, CF_HDROP layout) without opening windows or touching the clipboard; placement on a real window. Live: the real panel opened by the hotkey, typed into, grew and showed the result with bold words.

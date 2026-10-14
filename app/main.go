@@ -71,7 +71,7 @@ func run() error {
 	err = wails.Run(&options.App{
 		Title:  "Findly",
 		Width:  panelWidth,
-		Height: panelHeight,
+		Height: barHeight,
 		// A small search panel, not a normal window: no title bar, fixed size, above other
 		// windows, hidden until the hotkey or tray shows it.
 		Frameless:         true,
@@ -94,8 +94,13 @@ func run() error {
 		Windows: &windows.Options{
 			// WebView2 writes its browser data here, inside the app folder (plan I-3).
 			WebviewUserDataPath: webview,
-			Theme:               windows.SystemDefault,
-			DisablePinchZoom:    true,
+			Theme:               windows.SystemDefault, // light or dark, like Windows
+			// Glass look (docs/design/search-panel.md): a see-through page over Windows 11's
+			// acrylic blur. Frameless windows keep the rounded corners and shadow.
+			WebviewIsTransparent: true,
+			WindowIsTranslucent:  true,
+			BackdropType:         windows.Acrylic,
+			DisablePinchZoom:     true,
 		},
 		// Privacy (plan P-1): SmartScreen URL checks would send addresses to Microsoft.
 		// The window only shows bundled pages, so there is nothing to check.
