@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -20,6 +21,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/sanskarmishra479/findly/internal/safefs"
+	"github.com/sanskarmishra479/findly/internal/scan"
 )
 
 var (
@@ -30,8 +32,11 @@ var (
 
 	procShellExecuteW        = shell32.NewProc("ShellExecuteW")
 	procAssocQueryStringW    = shlwapi.NewProc("AssocQueryStringW")
+	procAssocIsDangerous     = shlwapi.NewProc("AssocIsDangerous")
 	procOpenClipboard        = user32.NewProc("OpenClipboard")
 	procCloseClipboard       = user32.NewProc("CloseClipboard")
+	procCreateWindowExW      = user32.NewProc("CreateWindowExW")
+	procDestroyWindow        = user32.NewProc("DestroyWindow")
 	procEmptyClipboard       = user32.NewProc("EmptyClipboard")
 	procSetClipboardData     = user32.NewProc("SetClipboardData")
 	procRegisterClipboardFmt = user32.NewProc("RegisterClipboardFormatW")
@@ -45,13 +50,25 @@ var (
 // ErrNotAvailable means the file is gone or is not a plain file (e.g. a link).
 var ErrNotAvailable = errors.New("opener: the file is no longer there")
 
-// runnable are extensions that run code when opened. Search must never start a program
-// by accident, so "Open" shows these in Explorer instead.
-var runnable = map[string]bool{
-	".exe": true, ".com": true, ".scr": true, ".pif": true, ".bat": true, ".cmd": true,
-	".ps1": true, ".psm1": true, ".vbs": true, ".vbe": true, ".js": true, ".jse": true,
-	".wsf": true, ".wsh": true, ".hta": true, ".msi": true, ".msp": true, ".lnk": true,
-	".url": true, ".reg": true, ".cpl": true, ".jar": true, ".appref-ms": true, ".application": true,
+// openable reports whether Open may hand the file to its app. Search must never start a
+// program by accident, and a list of dangerous types is never complete (.msc, .chm,
+// .xll, disk images, ... all run code or change the system). So it is an allowlist:
+// only the document and media types Findly indexes (text, documents, PDFs, images,
+// audio, video), and only if Windows itself does not mark the type as dangerous.
+// Everything else is shown in Explorer instead.
+func openable(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	return scan.Classify(path) != scan.KindOther && !assocIsDangerous(ext)
+}
+
+// assocIsDangerous asks Windows whether opening files of type ext is dangerous.
+func assocIsDangerous(ext string) bool {
+	e, err := windows.UTF16PtrFromString(ext)
+	if err != nil {
+		return true
+	}
+	r, _, _ := procAssocIsDangerous.Call(uintptr(unsafe.Pointer(e)))
+	return r != 0
 }
 
 // check confirms path is still an existing plain file. It is read-only (safefs).
@@ -65,16 +82,16 @@ func check(path string) error {
 
 // Open opens the file in its usual app. For a PDF with page > 0 it opens that page when
 // the user's PDF app supports it (Edge, Chrome, Firefox, SumatraPDF, Adobe); any other
-// app opens the file at its first page. Programs and scripts are shown in Explorer
-// instead of being run.
+// app opens the file at its first page. Anything but a known document or media type
+// (programs, scripts, ...) is shown in Explorer instead of being opened (openable).
 func Open(path string, page int) error {
 	if err := check(path); err != nil {
 		return err
 	}
-	ext := strings.ToLower(filepath.Ext(path))
-	if runnable[ext] {
+	if !openable(path) {
 		return ShowInExplorer(path)
 	}
+	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".pdf" && page > 0 {
 		if app := assocExe(".pdf"); app != "" {
 			if cmd := pageCommand(app, path, page); cmd != nil {
@@ -90,8 +107,7 @@ func Open(path string, page int) error {
 func pageCommand(app, path string, page int) *exec.Cmd {
 	switch strings.ToLower(filepath.Base(app)) {
 	case "msedge.exe", "chrome.exe", "firefox.exe", "brave.exe":
-		u := url.URL{Scheme: "file", Path: "/" + filepath.ToSlash(path), Fragment: fmt.Sprintf("page=%d", page)}
-		return exec.Command(app, u.String())
+		return exec.Command(app, fileURL(path, page))
 	case "sumatrapdf.exe":
 		return exec.Command(app, "-page", fmt.Sprint(page), path)
 	case "acrobat.exe", "acrord32.exe":
@@ -164,12 +180,26 @@ func Copy(path string) error {
 	pref, _ := windows.UTF16PtrFromString("Preferred DropEffect")
 	prefFmt, _, _ := procRegisterClipboardFmt.Call(uintptr(unsafe.Pointer(pref)))
 
-	if r, _, e := procOpenClipboard.Call(0); r == 0 {
+	// The clipboard is opened per thread, and SetClipboardData fails after EmptyClipboard
+	// unless the clipboard was opened with a window (documented). So: stay on one OS
+	// thread, and own the clipboard through a small invisible message-only window.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	static, _ := windows.UTF16PtrFromString("STATIC")
+	const hwndMessage = ^uintptr(2) // HWND_MESSAGE = (HWND)-3
+	owner, _, e := procCreateWindowExW.Call(0, uintptr(unsafe.Pointer(static)), 0, 0, 0, 0, 0, 0, hwndMessage, 0, 0, 0)
+	if owner == 0 {
+		procGlobalFree.Call(hDrop)
+		procGlobalFree.Call(effect)
+		return fmt.Errorf("opener: clipboard window: %w", e)
+	}
+	defer procDestroyWindow.Call(owner)
+	if r, _, e := procOpenClipboard.Call(owner); r == 0 {
 		procGlobalFree.Call(hDrop)
 		procGlobalFree.Call(effect)
 		return fmt.Errorf("opener: clipboard busy: %w", e)
 	}
-	defer procCloseClipboard.Call()
+	defer procCloseClipboard.Call() // runs before DestroyWindow (defers run in reverse)
 	procEmptyClipboard.Call()
 	const cfHDrop = 15
 	if r, _, e := procSetClipboardData.Call(cfHDrop, hDrop); r == 0 {
@@ -220,4 +250,17 @@ func dropFiles(name []uint16) []byte {
 		binary.LittleEndian.PutUint16(drop[dropFilesSize+2*i:], c)
 	}
 	return drop
+}
+
+// fileURL is the file: URL of path at page: file:///C:/Docs/a.pdf#page=4, or for a
+// network share (\\server\share\a.pdf) file://server/share/a.pdf#page=4.
+func fileURL(path string, page int) string {
+	u := url.URL{Scheme: "file", Fragment: fmt.Sprintf("page=%d", page)}
+	if rest, ok := strings.CutPrefix(path, `\\`); ok && !strings.HasPrefix(rest, `?\`) {
+		host, share, _ := strings.Cut(rest, `\`)
+		u.Host, u.Path = host, "/"+filepath.ToSlash(share)
+	} else {
+		u.Path = "/" + filepath.ToSlash(path)
+	}
+	return u.String()
 }

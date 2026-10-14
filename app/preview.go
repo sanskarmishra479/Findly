@@ -36,7 +36,7 @@ type PreviewResponse struct {
 // too much memory for a quick look).
 const (
 	maxImageFile   = 40 << 20
-	maxImagePixels = 50_000_000
+	maxImageDecode = 128 << 20 // bytes the decoded image may use
 )
 
 // Preview returns the preview for result id (from Search) at itemID's passage. seq is
@@ -80,8 +80,11 @@ func (a *App) Preview(seq int, id, itemID int64, query string) PreviewResponse {
 		resp.Image = "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(pv.JPEG)
 		resp.Page, resp.Pages = pv.Page, pv.Pages
 	case "image":
-		img, err := imagePreview(f.Path)
+		img, err := imagePreview(ctx, f.Path)
 		if err != nil {
+			if ctx.Err() != nil {
+				return resp // the selection moved on
+			}
 			resp.Err = previewError(err)
 			return resp
 		}
@@ -128,7 +131,18 @@ func pageOf(locator string) int {
 
 // imagePreview reads an image read-only, scales it to the preview width and returns
 // it as a JPEG data URL.
-func imagePreview(path string) (string, error) {
+func imagePreview(ctx context.Context, path string) (string, error) {
+	// One decode at a time: each can use up to maxImageDecode bytes, and arrowing through
+	// results must not decode several large images at once.
+	select {
+	case imageSlot <- struct{}{}:
+		defer func() { <-imageSlot }()
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
 	data, err := safefs.ReadFile(path, maxImageFile)
 	if err != nil {
 		return "", err
@@ -137,7 +151,9 @@ func imagePreview(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if cfg.Width*cfg.Height > maxImagePixels {
+	// The limit is on decoded memory, not pixels: a 16-bit RGBA PNG needs 8 bytes per pixel,
+	// so a 383 KB file of 7000 x 7000 pixels decodes to ~400 MB (found in review).
+	if int64(cfg.Width)*int64(cfg.Height)*bytesPerPixel(cfg.ColorModel) > maxImageDecode {
 		return "", fmt.Errorf("%w: %dx%d", extract.ErrTooLarge, cfg.Width, cfg.Height)
 	}
 	img, _, err := image.Decode(bytes.NewReader(data))
@@ -246,5 +262,22 @@ func (c *pageCache) put(key string, pv extract.PagePreview) {
 		last := c.order.Back()
 		delete(c.byKey, last.Value.(*pageEntry).key)
 		c.order.Remove(last)
+	}
+}
+
+// imageSlot allows one image decode at a time.
+var imageSlot = make(chan struct{}, 1)
+
+// bytesPerPixel is the memory one decoded pixel of model takes in Go.
+func bytesPerPixel(model color.Model) int64 {
+	switch model {
+	case color.RGBA64Model, color.NRGBA64Model:
+		return 8
+	case color.Gray16Model:
+		return 2
+	case color.GrayModel, color.AlphaModel:
+		return 1
+	default:
+		return 4 // RGBA, NRGBA, YCbCr (≤ 3 bytes), paletted (1) and CMYK: 4 is enough
 	}
 }

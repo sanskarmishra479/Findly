@@ -1,8 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"errors"
+	"hash/crc32"
 	"image"
+	"image/color"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -78,5 +86,46 @@ func TestNewSearchCancelsOldOfSameKind(t *testing.T) {
 	}
 	if words2.Err() != nil {
 		t.Error("the newest search was cancelled")
+	}
+}
+
+// T4 review: a tiny file can claim a huge 16-bit image (8 bytes per pixel). It must be
+// refused from its header alone, before anything is decoded.
+func TestImagePreviewRefusesHugeDecode(t *testing.T) {
+	var b bytes.Buffer
+	b.WriteString("\x89PNG\r\n\x1a\n")
+	ihdr := make([]byte, 13)
+	binary.BigEndian.PutUint32(ihdr[0:], 7000) // width
+	binary.BigEndian.PutUint32(ihdr[4:], 7000) // height
+	ihdr[8], ihdr[9] = 16, 6                   // 16 bits per channel, RGBA
+	binary.Write(&b, binary.BigEndian, uint32(len(ihdr)))
+	chunk := append([]byte("IHDR"), ihdr...)
+	b.Write(chunk)
+	binary.Write(&b, binary.BigEndian, crc32.ChecksumIEEE(chunk))
+	path := filepath.Join(t.TempDir(), "huge.png")
+	os.WriteFile(path, b.Bytes(), 0o644)
+
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	_, err := imagePreview(context.Background(), path)
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	if !errors.Is(err, extract.ErrTooLarge) {
+		t.Fatalf("got %v, want ErrTooLarge", err)
+	}
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 16<<20 {
+		t.Fatalf("refusing it allocated %d MB", grew>>20)
+	}
+	// A cancelled preview does nothing.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := imagePreview(ctx, path); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled: got %v", err)
+	}
+}
+
+func TestBytesPerPixel(t *testing.T) {
+	if bytesPerPixel(color.NRGBA64Model) != 8 || bytesPerPixel(color.RGBAModel) != 4 || bytesPerPixel(color.GrayModel) != 1 {
+		t.Fatal("wrong bytes per pixel")
 	}
 }

@@ -5,6 +5,7 @@ package opener
 import (
 	"encoding/binary"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,19 +38,35 @@ func TestPageCommand(t *testing.T) {
 	}
 }
 
-func TestRunnableFilesAreNotRun(t *testing.T) {
-	for _, ext := range []string{".exe", ".BAT", ".ps1", ".lnk", ".msi", ".hta", ".vbs"} {
-		if !runnable[strings.ToLower(ext)] {
-			t.Errorf("%s would be run by Open", ext)
+func TestOnlyKnownTypesOpen(t *testing.T) {
+	// Types that run code or change the system when "opened" (the review found several
+	// missing from the old blocklist): all must go to Explorer instead.
+	for _, name := range []string{"x.exe", "x.BAT", "x.ps1", "x.lnk", "x.msi", "x.hta", "x.vbs",
+		"x.msc", "x.chm", "x.xll", "x.xbap", "x.diagcab", "x.theme", "x.themepack", "x.scf",
+		"x.website", "x.settingcontent-ms", "x.iso", "x.img", "x.vhd", "x.vhdx", "x.appinstaller",
+		"x.msix", "x.appx", "x.py", "x.js", "x.jar", "x.reg", "noextension"} {
+		if openable(name) {
+			t.Errorf("%s would be opened", name)
 		}
 	}
-	for _, ext := range []string{".pdf", ".docx", ".txt", ".png"} {
-		if runnable[ext] {
-			t.Errorf("%s would not open", ext)
+	for _, name := range []string{"x.pdf", "x.docx", "x.txt", "x.PNG", "x.jpg", "x.mp3", "x.mp4", "x.md"} {
+		if !openable(name) {
+			t.Errorf("%s would not open", name)
 		}
 	}
 }
 
+func TestFileURL(t *testing.T) {
+	cases := map[string]string{
+		`C:\Docs\My Report #2.pdf`:  "file:///C:/Docs/My%20Report%20%232.pdf#page=3",
+		`\\server\share\Docs\a.pdf`: "file://server/share/Docs/a.pdf#page=3",
+	}
+	for path, want := range cases {
+		if got := fileURL(path, 3); got != want {
+			t.Errorf("fileURL(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
 func TestMissingFileIsNotOpened(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "gone.pdf")
 	for name, f := range map[string]func(string) error{
@@ -86,5 +103,17 @@ func TestDropFilesLayout(t *testing.T) {
 	}
 	if got := string(utf16.Decode(units[:len(units)-2])); got != path {
 		t.Fatalf("path = %q, want %q", got, path)
+	}
+}
+
+// A real clipboard round trip, only when asked (it replaces the clipboard's content):
+// FINDLY_CLIPBOARD_TEST=<file> copies that file; the caller checks the clipboard.
+func TestCopyToClipboard(t *testing.T) {
+	path := os.Getenv("FINDLY_CLIPBOARD_TEST")
+	if path == "" {
+		t.Skip("set FINDLY_CLIPBOARD_TEST to a file to run (changes the clipboard)")
+	}
+	if err := Copy(path); err != nil {
+		t.Fatal(err)
 	}
 }
